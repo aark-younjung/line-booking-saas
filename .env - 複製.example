@@ -1,0 +1,17 @@
+# ============================
+# LINE 預約 SaaS 後端環境變數
+# 複製此檔案為 .env，並填入真實值
+# ============================
+
+# 伺服器
+PORT=3000
+
+# Supabase
+SUPABASE_URL=https://your-project-id.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
+
+# Super Admin 鑑權金鑰（自訂一組強密鑰）
+SUPER_ADMIN_KEY=your-super-admin-secret-key
+
+# 允許的 CORS 來源（逗號分隔）
+ALLOWED_ORIGINS=https://your-liff.pages.dev,https://your-admin.pages.dev
