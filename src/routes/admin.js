@@ -562,4 +562,95 @@ router.delete('/slots/:id', async (req, res) => {
   }
 });
 
+/**
+ * POST /api/admin/reminders/run
+ * 觸發「明天課程提醒」推播
+ * 找明天的 confirmed 預約 → 推播給客戶
+ *
+ * 可用 Cloudflare Workers Cron 每天定時呼叫
+ * Body: { tenantId, dryRun? }
+ */
+router.post('/reminders/run', async (req, res) => {
+  const { tenantId, dryRun } = req.body;
+  if (!tenantId) return res.status(400).json({ error: 'Missing tenantId' });
+
+  try {
+    const { getTenantById } = await import('../middleware/tenant.js');
+    const { sendLinePush } = await import('../utils/line.js');
+
+    const tenant = await getTenantById(tenantId);
+    if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
+
+    // 計算明天的範圍（台灣時區）
+    const now = new Date();
+    const tomorrow = new Date(now);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    const tomorrowStart = new Date(tomorrow.getFullYear(), tomorrow.getMonth(), tomorrow.getDate(), 0, 0, 0);
+    const tomorrowEnd = new Date(tomorrow.getFullYear(), tomorrow.getMonth(), tomorrow.getDate(), 23, 59, 59);
+
+    // 查明天的預約（confirmed 狀態）
+    const { data: bookings, error } = await supabase
+      .from('bookings')
+      .select(`
+        id,
+        customer:customer_id(line_uid, name),
+        course:course_id(name),
+        slot:slot_id(start_at, end_at)
+      `)
+      .eq('tenant_id', tenantId)
+      .eq('status', 'confirmed')
+      .gte('slot.start_at', tomorrowStart.toISOString())
+      .lte('slot.start_at', tomorrowEnd.toISOString());
+
+    if (error) throw error;
+
+    const valid = (bookings || []).filter(b => b.slot && b.customer?.line_uid);
+
+    if (dryRun) {
+      return res.json({
+        success: true,
+        dryRun: true,
+        count: valid.length,
+        bookings: valid.map(b => ({
+          customer: b.customer.name,
+          course: b.course?.name,
+          start: b.slot.start_at,
+        })),
+      });
+    }
+
+    // 實際推播
+    let sent = 0;
+    let failed = 0;
+    for (const b of valid) {
+      const start = new Date(b.slot.start_at).toLocaleString('zh-TW', {
+        timeZone: 'Asia/Taipei',
+        hour: '2-digit', minute: '2-digit'
+      });
+      const msg =
+        `📢 提醒您：明天有課喔～\n\n` +
+        `${b.customer.name || ''} 您好，\n` +
+        `📚 ${b.course?.name}\n` +
+        `🕐 明天 ${start}\n\n` +
+        `期待見到您！`;
+
+      const ok = await sendLinePush(
+        tenantId,
+        tenant.line_access_token,
+        b.customer.line_uid,
+        msg,
+        'reminder',
+        b.id
+      );
+      if (ok) sent++; else failed++;
+    }
+
+    console.log(`[Reminders] Sent ${sent}, failed ${failed}`);
+    res.json({ success: true, sent, failed, total: valid.length });
+  } catch (error) {
+    console.error('[Reminders] Error:', error);
+    res.status(500).json({ error: 'Failed to run reminders', details: error.message });
+  }
+});
+
 export default router;
