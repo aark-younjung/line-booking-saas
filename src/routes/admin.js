@@ -256,13 +256,20 @@ router.get('/slots', async (req, res) => {
  * Body: { tenantId, courseId, start_at, end_at, capacity }
  */
 router.post('/slots', async (req, res) => {
-  const { tenantId, courseId, start_at, end_at, capacity } = req.body;
+  const { tenantId, courseId, start_at, end_at, capacity, initial_booked } = req.body;
 
   if (!tenantId || !courseId || !start_at || !end_at) {
     return res.status(400).json({ error: 'Missing required fields' });
   }
 
   try {
+    const cap = parseInt(capacity, 10) || 10;
+    const initial = parseInt(initial_booked, 10) || 0;
+
+    if (initial > cap) {
+      return res.status(400).json({ error: '起始已預約人數不能超過容量' });
+    }
+
     const { data: slot, error } = await supabase
       .from('time_slots')
       .insert({
@@ -270,8 +277,8 @@ router.post('/slots', async (req, res) => {
         course_id: courseId,
         start_at,
         end_at,
-        capacity: parseInt(capacity, 10) || 10,
-        booked_count: 0,
+        capacity: cap,
+        booked_count: initial,
         is_active: true,
       })
       .select()
@@ -284,6 +291,183 @@ router.post('/slots', async (req, res) => {
   } catch (error) {
     console.error('[Admin] Error creating slot:', error);
     res.status(500).json({ error: 'Failed to create slot', details: error.message });
+  }
+});
+
+/**
+ * PATCH /api/admin/slots/:id
+ * 編輯時段（容量、起始預約人數、時間）
+ */
+router.patch('/slots/:id', async (req, res) => {
+  const { id } = req.params;
+  const { tenantId, capacity, booked_count, start_at, end_at, is_active } = req.body;
+
+  if (!tenantId) return res.status(400).json({ error: 'Missing tenantId' });
+
+  try {
+    // 先取得目前資料以驗證
+    const { data: current, error: fetchErr } = await supabase
+      .from('time_slots')
+      .select('*')
+      .eq('id', id)
+      .eq('tenant_id', tenantId)
+      .single();
+
+    if (fetchErr || !current) {
+      return res.status(404).json({ error: 'Slot not found' });
+    }
+
+    // 計算實際已被預約的人數（從 bookings 表查 non-cancelled）
+    const { count: realBookings } = await supabase
+      .from('bookings')
+      .select('id', { count: 'exact', head: true })
+      .eq('slot_id', id)
+      .neq('status', 'cancelled');
+
+    const updates = {};
+    if (start_at !== undefined) updates.start_at = start_at;
+    if (end_at !== undefined) updates.end_at = end_at;
+    if (is_active !== undefined) updates.is_active = is_active;
+
+    if (capacity !== undefined) {
+      const newCap = parseInt(capacity, 10);
+      if (newCap < realBookings) {
+        return res.status(400).json({
+          error: `容量不能小於實際預約人數 (${realBookings})`,
+        });
+      }
+      updates.capacity = newCap;
+    }
+
+    if (booked_count !== undefined) {
+      const newCount = parseInt(booked_count, 10);
+      if (newCount < realBookings) {
+        return res.status(400).json({
+          error: `已預約人數不能小於實際預約人數 (${realBookings})`,
+        });
+      }
+      const cap = updates.capacity || current.capacity;
+      if (newCount > cap) {
+        return res.status(400).json({ error: '已預約人數不能超過容量' });
+      }
+      updates.booked_count = newCount;
+    }
+
+    const { data: slot, error } = await supabase
+      .from('time_slots')
+      .update(updates)
+      .eq('id', id)
+      .eq('tenant_id', tenantId)
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    console.log(`[Admin] Slot updated: ${id}`);
+    res.json({ success: true, data: slot });
+  } catch (error) {
+    console.error('[Admin] Error updating slot:', error);
+    res.status(500).json({ error: 'Failed to update slot', details: error.message });
+  }
+});
+
+/**
+ * GET /api/admin/slots/:id/customers
+ * 取得某時段的預約客戶名單
+ */
+router.get('/slots/:id/customers', async (req, res) => {
+  const { id } = req.params;
+  const { tenantId } = req.query;
+
+  if (!tenantId) return res.status(400).json({ error: 'Missing tenantId' });
+
+  try {
+    const { data: bookings, error } = await supabase
+      .from('bookings')
+      .select(`
+        id,
+        status,
+        created_at,
+        customer:customer_id(id, name, phone, line_uid, display_name)
+      `)
+      .eq('slot_id', id)
+      .eq('tenant_id', tenantId)
+      .neq('status', 'cancelled')
+      .order('created_at', { ascending: true });
+
+    if (error) throw error;
+
+    res.json({ success: true, data: bookings });
+  } catch (error) {
+    console.error('[Admin] Error fetching slot customers:', error);
+    res.status(500).json({ error: 'Failed to fetch customers', details: error.message });
+  }
+});
+
+/**
+ * GET /api/admin/customer/profile
+ * 取得客戶個人資料（LIFF 用）
+ * Query: tenantId, lineUid
+ */
+router.get('/customer/profile', async (req, res) => {
+  const { tenantId, lineUid } = req.query;
+
+  if (!tenantId || !lineUid) {
+    return res.status(400).json({ error: 'Missing tenantId or lineUid' });
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from('customers')
+      .select('id, line_uid, display_name, name, phone')
+      .eq('tenant_id', tenantId)
+      .eq('line_uid', lineUid)
+      .maybeSingle();
+
+    if (error) throw error;
+
+    res.json({ success: true, data: data || null });
+  } catch (error) {
+    console.error('[Admin] Error fetching customer profile:', error);
+    res.status(500).json({ error: 'Failed to fetch profile', details: error.message });
+  }
+});
+
+/**
+ * POST /api/admin/customer/profile
+ * 更新客戶個人資料（LIFF 用）
+ * Body: { tenantId, lineUid, name, phone, displayName }
+ */
+router.post('/customer/profile', async (req, res) => {
+  const { tenantId, lineUid, name, phone, displayName } = req.body;
+
+  if (!tenantId || !lineUid) {
+    return res.status(400).json({ error: 'Missing tenantId or lineUid' });
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from('customers')
+      .upsert(
+        {
+          tenant_id: tenantId,
+          line_uid: lineUid,
+          name: name || null,
+          phone: phone || null,
+          display_name: displayName || null,
+        },
+        { onConflict: 'tenant_id,line_uid' }
+      )
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    console.log(`[Admin] Customer profile updated: ${lineUid}`);
+    res.json({ success: true, data });
+  } catch (error) {
+    console.error('[Admin] Error updating customer profile:', error);
+    res.status(500).json({ error: 'Failed to update profile', details: error.message });
   }
 });
 

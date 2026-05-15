@@ -167,11 +167,18 @@ async function handleFollowEvent(event, tenant, tenantId) {
 
   console.log(`[Webhook] Customer record upserted: ${data.id}`);
 
-  // 歡迎訊息
+  // 歡迎訊息 + 引導填寫個人資料
+  const liffId = '2010061490-DycuG3uU';
+  const welcomeMsg =
+    '👋 歡迎加入蘇莉花藝！\n\n' +
+    '為了之後預約方便，請先填寫您的聯絡資料：\n' +
+    `https://liff.line.me/${liffId}/profile\n\n` +
+    '或直接從下方選單預約課程 🌸';
+
   await replyLineMessage(
     event.replyToken,
     tenant.line_access_token,
-    '👋 歡迎關注！我們是蘇莉花藝。請使用下方選單進行課程預約。'
+    welcomeMsg
   );
 }
 
