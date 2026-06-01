@@ -76,6 +76,57 @@ router.get('/bookings/:id/payment', async (req, res) => {
   }
 });
 
+/**
+ * POST /api/admin/upload-image
+ * 上傳課程圖片到 Supabase Storage
+ * Body: { tenantId, filename, dataBase64 }  (dataBase64 不含 data:image/... 前綴)
+ * 回傳: { url }
+ */
+router.post('/upload-image', async (req, res) => {
+  const { tenantId, filename, dataBase64, contentType } = req.body;
+  if (!tenantId || !dataBase64) {
+    return res.status(400).json({ error: 'Missing tenantId or image data' });
+  }
+
+  try {
+    const BUCKET = 'course-images';
+
+    // 確保 bucket 存在（公開讀取）
+    await supabase.storage.createBucket(BUCKET, { public: true }).catch(() => {});
+
+    // 解碼 base64
+    const buffer = Buffer.from(dataBase64, 'base64');
+
+    // 限制 5MB
+    if (buffer.length > 5 * 1024 * 1024) {
+      return res.status(400).json({ error: '圖片不能超過 5MB' });
+    }
+
+    // 產生檔名（用時間戳避免衝突）— 不用 Date.now，用隨機
+    const ext = (filename || 'img.jpg').split('.').pop().toLowerCase();
+    const safeExt = ['jpg', 'jpeg', 'png', 'webp', 'gif'].includes(ext) ? ext : 'jpg';
+    const rand = Math.random().toString(36).slice(2, 10);
+    const path = `${tenantId}/${rand}.${safeExt}`;
+
+    const { error: uploadErr } = await supabase.storage
+      .from(BUCKET)
+      .upload(path, buffer, {
+        contentType: contentType || `image/${safeExt}`,
+        upsert: true,
+      });
+
+    if (uploadErr) throw uploadErr;
+
+    const { data: pub } = supabase.storage.from(BUCKET).getPublicUrl(path);
+
+    console.log(`[Admin] Image uploaded: ${path}`);
+    res.json({ success: true, url: pub.publicUrl });
+  } catch (error) {
+    console.error('[Admin] Error uploading image:', error);
+    res.status(500).json({ error: '圖片上傳失敗', details: error.message });
+  }
+});
+
 // ============================================================
 // 課程管理 CRUD
 // ============================================================
