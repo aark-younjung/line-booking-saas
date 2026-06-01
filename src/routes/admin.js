@@ -86,7 +86,7 @@ router.get('/bookings/:id/payment', async (req, res) => {
  * Body: { tenantId, name, description, price, capacity, duration_min, image_url }
  */
 router.post('/courses', async (req, res) => {
-  const { tenantId, name, description, price, capacity, duration_min, image_url, sort_order } = req.body;
+  const { tenantId, name, description, price, capacity, duration_min, image_url, sort_order, min_students } = req.body;
 
   if (!tenantId || !name || price === undefined) {
     return res.status(400).json({ error: 'Missing required fields: tenantId, name, price' });
@@ -104,6 +104,7 @@ router.post('/courses', async (req, res) => {
         duration_min: parseInt(duration_min, 10) || 60,
         image_url: image_url || null,
         sort_order: parseInt(sort_order, 10) || 0,
+        min_students: parseInt(min_students, 10) || 1,
         is_active: true,
       })
       .select()
@@ -125,7 +126,7 @@ router.post('/courses', async (req, res) => {
  */
 router.patch('/courses/:id', async (req, res) => {
   const { id } = req.params;
-  const { tenantId, name, description, price, capacity, duration_min, image_url, is_active, sort_order } = req.body;
+  const { tenantId, name, description, price, capacity, duration_min, image_url, is_active, sort_order, min_students } = req.body;
 
   if (!tenantId) return res.status(400).json({ error: 'Missing tenantId' });
 
@@ -139,6 +140,7 @@ router.patch('/courses/:id', async (req, res) => {
     if (image_url !== undefined) updates.image_url = image_url;
     if (is_active !== undefined) updates.is_active = is_active;
     if (sort_order !== undefined) updates.sort_order = parseInt(sort_order, 10);
+    if (min_students !== undefined) updates.min_students = parseInt(min_students, 10);
 
     const { data: course, error } = await supabase
       .from('courses')
@@ -678,6 +680,179 @@ router.get('/today', async (req, res) => {
   } catch (error) {
     console.error('[Admin] Error fetching today:', error);
     res.status(500).json({ error: 'Failed to fetch today', details: error.message });
+  }
+});
+
+/**
+ * GET /api/admin/revenue
+ * 營收報表（依月份）
+ * Query: tenantId, month (YYYY-MM，預設本月)
+ */
+router.get('/revenue', async (req, res) => {
+  const { tenantId, month } = req.query;
+  if (!tenantId) return res.status(400).json({ error: 'Missing tenantId' });
+
+  try {
+    // 計算月份範圍
+    const now = new Date();
+    const ym = month || `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    const [year, mon] = ym.split('-').map(Number);
+    const monthStart = new Date(year, mon - 1, 1, 0, 0, 0);
+    const monthEnd = new Date(year, mon, 0, 23, 59, 59);
+
+    // 查該月「上課時間」落在範圍內、已確認/完成的預約
+    const { data: bookings, error } = await supabase
+      .from('bookings')
+      .select(`
+        id, status, used_credit,
+        course:course_id(name, price),
+        customer:customer_id(name),
+        slot:slot_id(start_at)
+      `)
+      .eq('tenant_id', tenantId)
+      .in('status', ['confirmed', 'completed']);
+
+    if (error) throw error;
+
+    // 篩選上課時間在該月的
+    const inMonth = (bookings || []).filter(b => {
+      if (!b.slot?.start_at) return false;
+      const t = new Date(b.slot.start_at);
+      return t >= monthStart && t <= monthEnd;
+    });
+
+    // 統計
+    let totalRevenue = 0;
+    let paidCount = 0;       // 實際收費的預約（非會員）
+    let creditCount = 0;     // 會員預約（已預收，不計入當月）
+    const byCourse = {};
+    const byCustomer = {};
+
+    for (const b of inMonth) {
+      const price = b.course?.price || 0;
+      const courseName = b.course?.name || '未知';
+      const custName = b.customer?.name || '匿名';
+
+      if (b.used_credit) {
+        creditCount++;
+      } else {
+        totalRevenue += price;
+        paidCount++;
+      }
+
+      // 依課程
+      if (!byCourse[courseName]) byCourse[courseName] = { count: 0, revenue: 0 };
+      byCourse[courseName].count++;
+      if (!b.used_credit) byCourse[courseName].revenue += price;
+
+      // 依客戶
+      if (!byCustomer[custName]) byCustomer[custName] = { count: 0, revenue: 0 };
+      byCustomer[custName].count++;
+      if (!b.used_credit) byCustomer[custName].revenue += price;
+    }
+
+    res.json({
+      success: true,
+      data: {
+        month: ym,
+        totalRevenue,
+        totalBookings: inMonth.length,
+        paidCount,
+        creditCount,
+        byCourse: Object.entries(byCourse).map(([name, v]) => ({ name, ...v })).sort((a, b) => b.revenue - a.revenue),
+        byCustomer: Object.entries(byCustomer).map(([name, v]) => ({ name, ...v })).sort((a, b) => b.count - a.count),
+      },
+    });
+  } catch (error) {
+    console.error('[Admin] Error fetching revenue:', error);
+    res.status(500).json({ error: 'Failed to fetch revenue', details: error.message });
+  }
+});
+
+/**
+ * POST /api/admin/slots/:id/cancel-class
+ * 取消整個時段（人數不足不開課）
+ * 取消所有預約 + 推播通知學員 + 退還會員堂數
+ * Body: { tenantId, reason? }
+ */
+router.post('/slots/:id/cancel-class', async (req, res) => {
+  const { id: slotId } = req.params;
+  const { tenantId, reason } = req.body;
+  if (!tenantId) return res.status(400).json({ error: 'Missing tenantId' });
+
+  try {
+    const { getTenantById } = await import('../middleware/tenant.js');
+    const { sendLinePush } = await import('../utils/line.js');
+    const tenant = await getTenantById(tenantId);
+    if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
+
+    // 取得時段資訊
+    const { data: slot } = await supabase
+      .from('time_slots')
+      .select('*, course:course_id(name)')
+      .eq('id', slotId)
+      .eq('tenant_id', tenantId)
+      .single();
+
+    if (!slot) return res.status(404).json({ error: 'Slot not found' });
+
+    // 取得所有未取消的預約
+    const { data: bookings } = await supabase
+      .from('bookings')
+      .select('id, used_credit, customer:customer_id(id, line_uid, name, credits)')
+      .eq('slot_id', slotId)
+      .eq('tenant_id', tenantId)
+      .neq('status', 'cancelled');
+
+    const startTime = new Date(slot.start_at).toLocaleString('zh-TW', {
+      timeZone: 'Asia/Taipei',
+      month: '2-digit', day: '2-digit', weekday: 'short',
+      hour: '2-digit', minute: '2-digit'
+    });
+
+    let notified = 0;
+    for (const b of (bookings || [])) {
+      // 取消預約
+      await supabase
+        .from('bookings')
+        .update({ status: 'cancelled', cancelled_at: new Date().toISOString(), cancelled_by: 'owner' })
+        .eq('id', b.id);
+
+      // 會員退還堂數
+      if (b.used_credit && b.customer?.id) {
+        await supabase
+          .from('customers')
+          .update({ credits: (b.customer.credits || 0) + 1 })
+          .eq('id', b.customer.id);
+      }
+
+      // 推播通知
+      if (b.customer?.line_uid) {
+        const msg =
+          `⚠️ 課程取消通知\n\n` +
+          `${b.customer.name || ''} 您好，很抱歉，以下課程因故取消：\n\n` +
+          `📚 ${slot.course?.name}\n` +
+          `🕐 ${startTime}\n\n` +
+          (reason ? `原因：${reason}\n\n` : '') +
+          (b.used_credit ? '已退還 1 堂課程額度。\n' : '如已付款，將安排退款，請聯絡業主。\n') +
+          `造成不便敬請見諒。`;
+
+        const ok = await sendLinePush(tenantId, tenant.line_access_token, b.customer.line_uid, msg, 'cancelled', b.id);
+        if (ok) notified++;
+      }
+    }
+
+    // 時段停用
+    await supabase
+      .from('time_slots')
+      .update({ is_active: false, booked_count: 0 })
+      .eq('id', slotId);
+
+    console.log(`[Admin] Class cancelled: ${slotId}, notified ${notified}`);
+    res.json({ success: true, cancelled: (bookings || []).length, notified });
+  } catch (error) {
+    console.error('[Admin] Error cancelling class:', error);
+    res.status(500).json({ error: 'Failed to cancel class', details: error.message });
   }
 });
 
