@@ -66,7 +66,11 @@ router.post('/', async (req, res) => {
       });
     }
 
-    // 3. 建立預約（狀態: pending_payment）
+    // 判斷會員：如果客戶有剩餘堂數 → 用會員身份預約（直接 confirmed，不用付款）
+    const useCredit = customer.credits > 0;
+    const status = useCredit ? 'confirmed' : 'pending_payment';
+
+    // 3. 建立預約
     const { data: booking, error: bookingError } = await supabase
       .from('bookings')
       .insert({
@@ -74,7 +78,8 @@ router.post('/', async (req, res) => {
         customer_id: customer.id,
         course_id: courseId,
         slot_id: slotId,
-        status: 'pending_payment',
+        status,
+        used_credit: useCredit,
       })
       .select()
       .single();
@@ -83,7 +88,15 @@ router.post('/', async (req, res) => {
       throw bookingError;
     }
 
-    console.log(`[Bookings] Created booking: ${booking.id}`);
+    console.log(`[Bookings] Created booking: ${booking.id} (credit: ${useCredit})`);
+
+    // 扣會員堂數
+    if (useCredit) {
+      await supabase
+        .from('customers')
+        .update({ credits: customer.credits - 1 })
+        .eq('id', customer.id);
+    }
 
     // 4. 發送確認訊息給客戶
     const { data: course } = await supabase
@@ -92,11 +105,15 @@ router.post('/', async (req, res) => {
       .eq('id', courseId)
       .single();
 
-    const message =
-      `✅ 預約成功！\n` +
-      `課程：${course?.name}\n` +
-      `時間：${new Date(slot.start_at).toLocaleString('zh-TW')}\n` +
-      `請填寫匯款資訊以完成預約。`;
+    const message = useCredit
+      ? `✅ 預約成功！\n` +
+        `課程：${course?.name}\n` +
+        `時間：${new Date(slot.start_at).toLocaleString('zh-TW')}\n` +
+        `已使用會員 1 堂 · 剩餘 ${customer.credits - 1} 堂`
+      : `✅ 預約成功！\n` +
+        `課程：${course?.name}\n` +
+        `時間：${new Date(slot.start_at).toLocaleString('zh-TW')}\n` +
+        `請填寫匯款資訊以完成預約。`;
 
     await sendLinePush(
       tenantId,
@@ -108,12 +125,17 @@ router.post('/', async (req, res) => {
     );
 
     // 5. 通知業主
-    const ownerMessage =
-      `📌 新預約\n` +
-      `客戶：${customerName}\n` +
-      `課程：${course?.name}\n` +
-      `時間：${new Date(slot.start_at).toLocaleString('zh-TW')}\n` +
-      `狀態：待匯款確認`;
+    const ownerMessage = useCredit
+      ? `📌 會員預約\n` +
+        `客戶：${customerName}（${customer.membership_label || '會員'}）\n` +
+        `課程：${course?.name}\n` +
+        `時間：${new Date(slot.start_at).toLocaleString('zh-TW')}\n` +
+        `剩餘 ${customer.credits - 1} 堂`
+      : `📌 新預約\n` +
+        `客戶：${customerName}\n` +
+        `課程：${course?.name}\n` +
+        `時間：${new Date(slot.start_at).toLocaleString('zh-TW')}\n` +
+        `狀態：待匯款確認`;
 
     const { data: owner } = await supabase
       .from('owners')

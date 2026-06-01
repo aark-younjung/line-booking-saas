@@ -419,7 +419,7 @@ router.get('/customer/profile', async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('customers')
-      .select('id, line_uid, display_name, name, phone')
+      .select('id, line_uid, display_name, name, phone, credits, membership_label')
       .eq('tenant_id', tenantId)
       .eq('line_uid', lineUid)
       .maybeSingle();
@@ -559,6 +559,125 @@ router.delete('/slots/:id', async (req, res) => {
   } catch (error) {
     console.error('[Admin] Error deleting slot:', error);
     res.status(500).json({ error: 'Failed to delete slot', details: error.message });
+  }
+});
+
+// ============================================================
+// 客戶管理（會員制 + 證照課堂數）
+// ============================================================
+
+/**
+ * GET /api/admin/customers
+ * 查詢所有客戶
+ * Query: tenantId, search (optional)
+ */
+router.get('/customers', async (req, res) => {
+  const { tenantId, search } = req.query;
+  if (!tenantId) return res.status(400).json({ error: 'Missing tenantId' });
+
+  try {
+    let query = supabase
+      .from('customers')
+      .select('*')
+      .eq('tenant_id', tenantId)
+      .order('updated_at', { ascending: false });
+
+    if (search) {
+      query = query.or(`name.ilike.%${search}%,phone.ilike.%${search}%,display_name.ilike.%${search}%`);
+    }
+
+    const { data, error } = await query.limit(200);
+    if (error) throw error;
+
+    res.json({ success: true, data });
+  } catch (error) {
+    console.error('[Admin] Error fetching customers:', error);
+    res.status(500).json({ error: 'Failed to fetch customers', details: error.message });
+  }
+});
+
+/**
+ * PATCH /api/admin/customers/:id
+ * 更新客戶資料（業主用）
+ * Body: { tenantId, name, phone, membership_label, credits, notes }
+ */
+router.patch('/customers/:id', async (req, res) => {
+  const { id } = req.params;
+  const { tenantId, name, phone, membership_label, credits, notes } = req.body;
+  if (!tenantId) return res.status(400).json({ error: 'Missing tenantId' });
+
+  try {
+    const updates = {};
+    if (name !== undefined) updates.name = name;
+    if (phone !== undefined) updates.phone = phone;
+    if (membership_label !== undefined) updates.membership_label = membership_label;
+    if (credits !== undefined) updates.credits = parseInt(credits, 10) || 0;
+    if (notes !== undefined) updates.notes = notes;
+
+    const { data, error } = await supabase
+      .from('customers')
+      .update(updates)
+      .eq('id', id)
+      .eq('tenant_id', tenantId)
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.json({ success: true, data });
+  } catch (error) {
+    console.error('[Admin] Error updating customer:', error);
+    res.status(500).json({ error: 'Failed to update customer', details: error.message });
+  }
+});
+
+/**
+ * GET /api/admin/today
+ * 取得今日所有課程 + 學員
+ */
+router.get('/today', async (req, res) => {
+  const { tenantId } = req.query;
+  if (!tenantId) return res.status(400).json({ error: 'Missing tenantId' });
+
+  try {
+    const now = new Date();
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
+    const todayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59);
+
+    // 找今天有預約的所有時段
+    const { data: slots, error } = await supabase
+      .from('time_slots')
+      .select(`
+        *,
+        course:course_id(name, price)
+      `)
+      .eq('tenant_id', tenantId)
+      .gte('start_at', todayStart.toISOString())
+      .lte('start_at', todayEnd.toISOString())
+      .order('start_at', { ascending: true });
+
+    if (error) throw error;
+
+    // 各時段抓學員
+    const slotsWithCustomers = await Promise.all(
+      (slots || []).map(async (slot) => {
+        const { data: bookings } = await supabase
+          .from('bookings')
+          .select(`
+            id, status, used_credit,
+            customer:customer_id(name, phone, line_uid, display_name, membership_label)
+          `)
+          .eq('slot_id', slot.id)
+          .eq('tenant_id', tenantId)
+          .neq('status', 'cancelled');
+
+        return { ...slot, bookings: bookings || [] };
+      })
+    );
+
+    res.json({ success: true, data: slotsWithCustomers });
+  } catch (error) {
+    console.error('[Admin] Error fetching today:', error);
+    res.status(500).json({ error: 'Failed to fetch today', details: error.message });
   }
 });
 
