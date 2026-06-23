@@ -52,9 +52,9 @@ router.get('/:tenantId/:courseId/slots', async (req, res) => {
     today.setHours(0, 0, 0, 0);
     startDate = startDate || today.toISOString().split('T')[0];
 
-    const sevenDaysLater = new Date(today);
-    sevenDaysLater.setDate(sevenDaysLater.getDate() + 7);
-    endDate = endDate || sevenDaysLater.toISOString().split('T')[0];
+    const ninetyDaysLater = new Date(today);
+    ninetyDaysLater.setDate(ninetyDaysLater.getDate() + 90);
+    endDate = endDate || ninetyDaysLater.toISOString().split('T')[0];
 
     // 確保課程屬於此租戶
     const { data: course, error: courseError } = await supabase

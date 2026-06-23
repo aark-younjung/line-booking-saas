@@ -41,7 +41,7 @@ app.use((req, res, next) => {
     // Webhook 路由跳過 JSON 自動解析，使用 express.raw() 取得原始 Buffer
     return next();
   }
-  express.json()(req, res, next);
+  express.json({ limit: '10mb' })(req, res, next);  // 放大上限以支援圖片 base64 上傳
 });
 
 // ============================================================
