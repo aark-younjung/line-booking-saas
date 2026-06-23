@@ -6,6 +6,197 @@ import { getTenantById } from '../middleware/tenant.js';
 const router = express.Router();
 
 /**
+ * POST /api/bookings/package
+ * 建立課程包預約（一期 N 堂，一次選 N 個時段，一次付清）
+ * Body: { tenantId, lineUid, courseId, slotIds: [], customerName, customerPhone }
+ */
+router.post('/package', async (req, res) => {
+  const { tenantId, lineUid, courseId, slotIds, customerName, customerPhone } = req.body;
+
+  if (!tenantId || !lineUid || !courseId || !Array.isArray(slotIds) || slotIds.length === 0) {
+    return res.status(400).json({ error: 'Missing required fields' });
+  }
+
+  try {
+    const tenant = await getTenantById(tenantId);
+    if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
+
+    // 取得課程
+    const { data: course, error: courseErr } = await supabase
+      .from('courses')
+      .select('*')
+      .eq('id', courseId)
+      .eq('tenant_id', tenantId)
+      .single();
+
+    if (courseErr || !course) return res.status(404).json({ error: 'Course not found' });
+
+    // 驗證堂數
+    if (slotIds.length !== course.package_sessions) {
+      return res.status(400).json({ error: `此課程需選擇 ${course.package_sessions} 個時段` });
+    }
+
+    // 不可重複選同一時段
+    if (new Set(slotIds).size !== slotIds.length) {
+      return res.status(400).json({ error: '不能選擇重複的時段' });
+    }
+
+    // 確保客戶存在
+    const { data: customer, error: custErr } = await supabase
+      .from('customers')
+      .upsert(
+        { tenant_id: tenantId, line_uid: lineUid, display_name: customerName || '', name: customerName || '', phone: customerPhone || '' },
+        { onConflict: 'tenant_id,line_uid' }
+      )
+      .select()
+      .single();
+    if (custErr) throw custErr;
+
+    // 檢查每個時段容量
+    const { data: slots, error: slotsErr } = await supabase
+      .from('time_slots')
+      .select('*')
+      .in('id', slotIds)
+      .eq('tenant_id', tenantId);
+    if (slotsErr) throw slotsErr;
+
+    if (slots.length !== slotIds.length) {
+      return res.status(404).json({ error: '部分時段不存在' });
+    }
+    for (const s of slots) {
+      if (s.booked_count >= s.capacity) {
+        return res.status(409).json({ error: '部分時段已額滿，請重新選擇' });
+      }
+    }
+
+    // 建立 package
+    const totalPrice = course.price * course.package_sessions;
+    const { data: pkg, error: pkgErr } = await supabase
+      .from('booking_packages')
+      .insert({
+        tenant_id: tenantId,
+        customer_id: customer.id,
+        course_id: courseId,
+        status: 'pending_payment',
+        total_price: totalPrice,
+        sessions: course.package_sessions,
+      })
+      .select()
+      .single();
+    if (pkgErr) throw pkgErr;
+
+    // 建立 N 筆 bookings（避免 trigger 重複加 booked_count，先用 cancelled 再... 不，直接 insert pending）
+    const bookingRows = slotIds.map(slotId => ({
+      tenant_id: tenantId,
+      customer_id: customer.id,
+      course_id: courseId,
+      slot_id: slotId,
+      status: 'pending_payment',
+      package_id: pkg.id,
+    }));
+
+    const { error: bErr } = await supabase.from('bookings').insert(bookingRows);
+    if (bErr) throw bErr;
+
+    console.log(`[Bookings] Package created: ${pkg.id} (${slotIds.length} sessions)`);
+
+    // 推播：報名成功 + 注意事項 + 匯款說明
+    const slotTimes = slots
+      .sort((a, b) => new Date(a.start_at) - new Date(b.start_at))
+      .map(s => `　• ${new Date(s.start_at).toLocaleString('zh-TW', { timeZone: 'Asia/Taipei', month: '2-digit', day: '2-digit', weekday: 'short', hour: '2-digit', minute: '2-digit' })}`)
+      .join('\n');
+
+    let msg =
+      `✅ 報名成功！\n\n` +
+      `📚 ${course.name}（共 ${course.package_sessions} 堂）\n` +
+      `您預約的上課日期：\n${slotTimes}\n\n` +
+      `💰 應繳費用：NT$${totalPrice.toLocaleString()}\n` +
+      `請於 ${course.payment_days} 日內完成匯款，並回傳後五碼。\n` +
+      `（逾期未匯款，名額將自動釋出）`;
+
+    if (course.notice) {
+      msg += `\n\n📋 報名注意事項：\n${course.notice}`;
+    }
+
+    await sendLinePush(tenantId, tenant.line_access_token, lineUid, msg, 'booking_created', null);
+
+    // 通知業主
+    const { data: owner } = await supabase
+      .from('owners').select('line_uid').eq('tenant_id', tenantId).single();
+    if (owner?.line_uid) {
+      await sendLinePush(
+        tenantId, tenant.line_access_token, owner.line_uid,
+        `📌 新課程包報名\n客戶：${customerName}\n課程：${course.name}（${course.package_sessions} 堂）\n金額：NT$${totalPrice.toLocaleString()}\n狀態：待匯款`,
+        'booking_created', null
+      );
+    }
+
+    res.json({ success: true, data: { package_id: pkg.id, total_price: totalPrice } });
+  } catch (error) {
+    console.error('[Bookings] Error creating package:', error);
+    res.status(500).json({ error: 'Failed to create package', details: error.message });
+  }
+});
+
+/**
+ * POST /api/bookings/package/:id/payment
+ * 課程包提交匯款
+ * Body: { tenantId, method, lastFiveDigits, amount }
+ */
+router.post('/package/:id/payment', async (req, res) => {
+  const { id: packageId } = req.params;
+  const { tenantId, method, lastFiveDigits, amount } = req.body;
+
+  if (!tenantId || !method) return res.status(400).json({ error: 'Missing fields' });
+
+  try {
+    const tenant = await getTenantById(tenantId);
+    if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
+
+    const { data: pkg, error: pkgErr } = await supabase
+      .from('booking_packages')
+      .select('*, customer:customer_id(name)')
+      .eq('id', packageId)
+      .eq('tenant_id', tenantId)
+      .single();
+    if (pkgErr || !pkg) return res.status(404).json({ error: 'Package not found' });
+    if (pkg.status !== 'pending_payment') {
+      return res.status(409).json({ error: `此報名狀態為 ${pkg.status}` });
+    }
+
+    // 建立匯款記錄
+    await supabase.from('payment_confirmations').insert({
+      tenant_id: tenantId,
+      booking_id: null,
+      package_id: packageId,
+      method,
+      last_five_digits: lastFiveDigits || null,
+      amount: amount || pkg.total_price,
+    });
+
+    // 更新 package + 所有 bookings 狀態
+    await supabase.from('booking_packages').update({ status: 'pending_confirmation' }).eq('id', packageId);
+    await supabase.from('bookings').update({ status: 'pending_confirmation' }).eq('package_id', packageId);
+
+    // 通知業主
+    const { data: owner } = await supabase
+      .from('owners').select('line_uid').eq('tenant_id', tenantId).single();
+    if (owner?.line_uid) {
+      await sendLinePush(
+        tenantId, tenant.line_access_token, owner.line_uid,
+        `💰 課程包待確認匯款\n客戶：${pkg.customer?.name}\n後五碼：${lastFiveDigits || '(截圖)'}\n金額：${amount || pkg.total_price}`,
+        'payment_received', null
+      );
+    }
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('[Bookings] Error package payment:', error);
+    res.status(500).json({ error: 'Failed', details: error.message });
+  }
+});
+
+/**
  * POST /api/bookings
  * 建立預約
  * Body: { tenantId, lineUid, courseId, slotId, customerName, customerPhone }

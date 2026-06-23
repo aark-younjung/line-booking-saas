@@ -137,7 +137,10 @@ router.post('/upload-image', async (req, res) => {
  * Body: { tenantId, name, description, price, capacity, duration_min, image_url }
  */
 router.post('/courses', async (req, res) => {
-  const { tenantId, name, description, price, capacity, duration_min, image_url, sort_order, min_students } = req.body;
+  const {
+    tenantId, name, description, price, capacity, duration_min, image_url, sort_order, min_students,
+    course_type, package_sessions, payment_days, free_changes, lock_days, notice
+  } = req.body;
 
   if (!tenantId || !name || price === undefined) {
     return res.status(400).json({ error: 'Missing required fields: tenantId, name, price' });
@@ -156,6 +159,12 @@ router.post('/courses', async (req, res) => {
         image_url: image_url || null,
         sort_order: parseInt(sort_order, 10) || 0,
         min_students: parseInt(min_students, 10) || 1,
+        course_type: course_type || 'single',
+        package_sessions: parseInt(package_sessions, 10) || 1,
+        payment_days: parseInt(payment_days, 10) || 3,
+        free_changes: parseInt(free_changes, 10) || 2,
+        lock_days: parseInt(lock_days, 10) || 3,
+        notice: notice || null,
         is_active: true,
       })
       .select()
@@ -192,6 +201,12 @@ router.patch('/courses/:id', async (req, res) => {
     if (is_active !== undefined) updates.is_active = is_active;
     if (sort_order !== undefined) updates.sort_order = parseInt(sort_order, 10);
     if (min_students !== undefined) updates.min_students = parseInt(min_students, 10);
+    if (req.body.course_type !== undefined) updates.course_type = req.body.course_type;
+    if (req.body.package_sessions !== undefined) updates.package_sessions = parseInt(req.body.package_sessions, 10);
+    if (req.body.payment_days !== undefined) updates.payment_days = parseInt(req.body.payment_days, 10);
+    if (req.body.free_changes !== undefined) updates.free_changes = parseInt(req.body.free_changes, 10);
+    if (req.body.lock_days !== undefined) updates.lock_days = parseInt(req.body.lock_days, 10);
+    if (req.body.notice !== undefined) updates.notice = req.body.notice;
 
     const { data: course, error } = await supabase
       .from('courses')
@@ -904,6 +919,185 @@ router.post('/slots/:id/cancel-class', async (req, res) => {
   } catch (error) {
     console.error('[Admin] Error cancelling class:', error);
     res.status(500).json({ error: 'Failed to cancel class', details: error.message });
+  }
+});
+
+/**
+ * GET /api/admin/packages
+ * 查詢課程包報名（業主用）
+ * Query: tenantId, status (optional)
+ */
+router.get('/packages', async (req, res) => {
+  const { tenantId, status } = req.query;
+  if (!tenantId) return res.status(400).json({ error: 'Missing tenantId' });
+
+  try {
+    let query = supabase
+      .from('booking_packages')
+      .select(`
+        *,
+        course:course_id(name),
+        customer:customer_id(name, phone, line_uid)
+      `)
+      .eq('tenant_id', tenantId);
+
+    if (status) query = query.eq('status', status);
+
+    const { data, error } = await query.order('created_at', { ascending: false });
+    if (error) throw error;
+
+    // 各 package 附上時段清單
+    const withSlots = await Promise.all((data || []).map(async (pkg) => {
+      const { data: bks } = await supabase
+        .from('bookings')
+        .select('id, status, slot:slot_id(start_at)')
+        .eq('package_id', pkg.id)
+        .neq('status', 'cancelled');
+      const slots = (bks || []).map(b => b.slot?.start_at).filter(Boolean).sort();
+      return { ...pkg, slots };
+    }));
+
+    res.json({ success: true, data: withSlots });
+  } catch (error) {
+    console.error('[Admin] Error fetching packages:', error);
+    res.status(500).json({ error: 'Failed', details: error.message });
+  }
+});
+
+/**
+ * GET /api/admin/packages/:id/payment
+ * 課程包的匯款資訊
+ */
+router.get('/packages/:id/payment', async (req, res) => {
+  const { id } = req.params;
+  const { tenantId } = req.query;
+  if (!tenantId) return res.status(400).json({ error: 'Missing tenantId' });
+
+  try {
+    const { data, error } = await supabase
+      .from('payment_confirmations')
+      .select('*')
+      .eq('package_id', id)
+      .eq('tenant_id', tenantId)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .single();
+    if (error || !data) return res.status(404).json({ error: 'Payment info not found' });
+    res.json({ success: true, data });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed', details: error.message });
+  }
+});
+
+/**
+ * PATCH /api/admin/packages/:id/confirm
+ * 業主確認課程包匯款 → 所有堂數 confirmed
+ */
+router.patch('/packages/:id/confirm', async (req, res) => {
+  const { id } = req.params;
+  const { tenantId } = req.body;
+  if (!tenantId) return res.status(400).json({ error: 'Missing tenantId' });
+
+  try {
+    const { getTenantById } = await import('../middleware/tenant.js');
+    const { sendLinePush } = await import('../utils/line.js');
+    const tenant = await getTenantById(tenantId);
+
+    const { data: pkg } = await supabase
+      .from('booking_packages')
+      .select('*, course:course_id(name), customer:customer_id(line_uid, name)')
+      .eq('id', id).eq('tenant_id', tenantId).single();
+    if (!pkg) return res.status(404).json({ error: 'Package not found' });
+
+    await supabase.from('booking_packages').update({ status: 'confirmed' }).eq('id', id);
+    await supabase.from('bookings').update({ status: 'confirmed' }).eq('package_id', id).neq('status', 'cancelled');
+
+    if (pkg.customer?.line_uid) {
+      await sendLinePush(
+        tenantId, tenant.line_access_token, pkg.customer.line_uid,
+        `✅ 報名確認完成！\n\n${pkg.customer?.name || ''} 您好，您報名的「${pkg.course?.name}」已收到款項，報名確認完成。\n\n期待見到您 🌸`,
+        'confirmed', null
+      );
+    }
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('[Admin] Error confirming package:', error);
+    res.status(500).json({ error: 'Failed', details: error.message });
+  }
+});
+
+/**
+ * POST /api/admin/payment-check/run
+ * 檢查未匯款的課程包：
+ * - 超過 (payment_days - 1) 天未匯款且未提醒 → 催款
+ * - 超過 payment_days 天未匯款 → 取消、釋出名額、通知
+ *
+ * 給 Cloudflare Cron 每小時呼叫
+ */
+router.post('/payment-check/run', async (req, res) => {
+  const { tenantId } = req.body;
+  if (!tenantId) return res.status(400).json({ error: 'Missing tenantId' });
+
+  try {
+    const { getTenantById } = await import('../middleware/tenant.js');
+    const { sendLinePush } = await import('../utils/line.js');
+    const tenant = await getTenantById(tenantId);
+    if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
+
+    const now = Date.now();
+
+    // 取得所有待匯款的課程包
+    const { data: pkgs } = await supabase
+      .from('booking_packages')
+      .select('*, course:course_id(name, payment_days), customer:customer_id(line_uid, name)')
+      .eq('tenant_id', tenantId)
+      .eq('status', 'pending_payment');
+
+    let reminded = 0, cancelled = 0;
+
+    for (const pkg of (pkgs || [])) {
+      const ageDays = (now - new Date(pkg.created_at).getTime()) / (1000 * 60 * 60 * 24);
+      const payDays = pkg.course?.payment_days || 3;
+      const uid = pkg.customer?.line_uid;
+
+      // 超過期限 → 取消
+      if (ageDays >= payDays) {
+        // 取消所有 bookings（trigger 自動釋出 booked_count）
+        await supabase.from('bookings').update({
+          status: 'cancelled', cancelled_at: new Date().toISOString(), cancelled_by: 'system'
+        }).eq('package_id', pkg.id).neq('status', 'cancelled');
+
+        await supabase.from('booking_packages').update({ status: 'cancelled' }).eq('id', pkg.id);
+
+        if (uid) {
+          await sendLinePush(
+            tenantId, tenant.line_access_token, uid,
+            `⚠️ 報名已自動取消\n\n${pkg.customer?.name || ''} 您好，您報名的「${pkg.course?.name}」因逾 ${payDays} 日未完成匯款，名額已自動釋出。\n\n如仍想上課，請重新報名。`,
+            'cancelled', null
+          );
+        }
+        cancelled++;
+      }
+      // 超過 (payDays - 1) 天且未提醒 → 催款
+      else if (ageDays >= payDays - 1 && !pkg.payment_reminded) {
+        if (uid) {
+          await sendLinePush(
+            tenantId, tenant.line_access_token, uid,
+            `🔔 匯款提醒\n\n${pkg.customer?.name || ''} 您好，您報名的「${pkg.course?.name}」尚未完成匯款。\n\n請於明日前完成匯款並回傳後五碼，逾期名額將自動釋出 🙏`,
+            'reminder', null
+          );
+        }
+        await supabase.from('booking_packages').update({ payment_reminded: true }).eq('id', pkg.id);
+        reminded++;
+      }
+    }
+
+    console.log(`[PaymentCheck] reminded ${reminded}, cancelled ${cancelled}`);
+    res.json({ success: true, reminded, cancelled });
+  } catch (error) {
+    console.error('[PaymentCheck] Error:', error);
+    res.status(500).json({ error: 'Failed', details: error.message });
   }
 });
 
