@@ -6,6 +6,158 @@ import { getTenantById } from '../middleware/tenant.js';
 const router = express.Router();
 
 /**
+ * GET /api/bookings/my
+ * 學生查詢自己的課程包預約（LIFF 我的預約頁）
+ * Query: tenantId, lineUid
+ */
+router.get('/my', async (req, res) => {
+  const { tenantId, lineUid } = req.query;
+  if (!tenantId || !lineUid) return res.status(400).json({ error: 'Missing params' });
+
+  try {
+    // 找客戶
+    const { data: customer } = await supabase
+      .from('customers')
+      .select('id')
+      .eq('tenant_id', tenantId)
+      .eq('line_uid', lineUid)
+      .maybeSingle();
+
+    if (!customer) return res.json({ success: true, data: [] });
+
+    // 取得課程包
+    const { data: pkgs } = await supabase
+      .from('booking_packages')
+      .select('*, course:course_id(name, free_changes, lock_days, package_sessions)')
+      .eq('tenant_id', tenantId)
+      .eq('customer_id', customer.id)
+      .neq('status', 'cancelled')
+      .order('created_at', { ascending: false });
+
+    // 各包附上 bookings（含時段）
+    const result = await Promise.all((pkgs || []).map(async (pkg) => {
+      const { data: bks } = await supabase
+        .from('bookings')
+        .select('id, status, slot:slot_id(id, start_at, end_at)')
+        .eq('package_id', pkg.id)
+        .neq('status', 'cancelled')
+        .order('created_at', { ascending: true });
+
+      const bookings = (bks || [])
+        .filter(b => b.slot)
+        .sort((a, b) => new Date(a.slot.start_at) - new Date(b.slot.start_at));
+
+      return { ...pkg, bookings };
+    }));
+
+    res.json({ success: true, data: result });
+  } catch (error) {
+    console.error('[Bookings] Error fetching my bookings:', error);
+    res.status(500).json({ error: 'Failed', details: error.message });
+  }
+});
+
+/**
+ * PATCH /api/bookings/:id/reschedule
+ * 學生自助改期（課程包）
+ * Body: { tenantId, lineUid, newSlotId }
+ * 規則：開課前 lock_days 天以上才能改、每期限 free_changes 次
+ */
+router.patch('/:id/reschedule', async (req, res) => {
+  const { id: bookingId } = req.params;
+  const { tenantId, lineUid, newSlotId } = req.body;
+  if (!tenantId || !lineUid || !newSlotId) return res.status(400).json({ error: 'Missing params' });
+
+  try {
+    const tenant = await getTenantById(tenantId);
+
+    // 取得預約 + 驗證歸屬
+    const { data: booking } = await supabase
+      .from('bookings')
+      .select('*, customer:customer_id(line_uid, name), course:course_id(name, lock_days, free_changes), old_slot:slot_id(start_at), package:package_id(id, change_count)')
+      .eq('id', bookingId)
+      .eq('tenant_id', tenantId)
+      .single();
+
+    if (!booking) return res.status(404).json({ error: '找不到預約' });
+    if (booking.customer?.line_uid !== lineUid) return res.status(403).json({ error: '無權限' });
+    if (!booking.package_id) return res.status(400).json({ error: '單堂課不開放改期' });
+    if (booking.status === 'cancelled') return res.status(409).json({ error: '預約已取消' });
+
+    const lockDays = booking.course?.lock_days ?? 3;
+    const freeChanges = booking.course?.free_changes ?? 2;
+
+    // 檢查鎖定（開課前 lockDays 天內不能改）
+    const hoursUntil = (new Date(booking.old_slot.start_at).getTime() - Date.now()) / (1000 * 60 * 60);
+    if (hoursUntil < lockDays * 24) {
+      return res.status(409).json({ error: `開課前 ${lockDays} 天內無法改期` });
+    }
+
+    // 檢查改期次數
+    const used = booking.package?.change_count || 0;
+    if (used >= freeChanges) {
+      return res.status(409).json({ error: `已用完 ${freeChanges} 次免費改期，請聯絡業主` });
+    }
+
+    // 取得新時段
+    const { data: newSlot } = await supabase
+      .from('time_slots')
+      .select('*')
+      .eq('id', newSlotId)
+      .eq('tenant_id', tenantId)
+      .single();
+
+    if (!newSlot) return res.status(404).json({ error: '新時段不存在' });
+    if (newSlot.course_id !== booking.course_id) return res.status(400).json({ error: '只能改到同課程的時段' });
+    if (new Date(newSlot.start_at) <= new Date()) return res.status(400).json({ error: '不能選過去的時段' });
+    if (newSlot.booked_count >= newSlot.capacity) return res.status(409).json({ error: '新時段已額滿' });
+
+    const oldSlotId = booking.slot_id;
+
+    // 更新預約時段
+    await supabase.from('bookings').update({ slot_id: newSlotId }).eq('id', bookingId);
+
+    // 調整 booked_count：舊 -1、新 +1
+    await supabase.from('time_slots').update({ booked_count: Math.max(0, (await countSlot(oldSlotId)) ) }).eq('id', oldSlotId);
+    await supabase.from('time_slots').update({ booked_count: newSlot.booked_count + 1 }).eq('id', newSlotId);
+
+    // 改期次數 +1
+    await supabase.from('booking_packages')
+      .update({ change_count: used + 1 })
+      .eq('id', booking.package_id);
+
+    console.log(`[Bookings] Rescheduled ${bookingId}: ${oldSlotId} -> ${newSlotId}`);
+
+    // 通知業主
+    const { data: owner } = await supabase.from('owners').select('line_uid').eq('tenant_id', tenantId).single();
+    if (owner?.line_uid) {
+      const oldT = new Date(booking.old_slot.start_at).toLocaleString('zh-TW', { timeZone: 'Asia/Taipei', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+      const newT = new Date(newSlot.start_at).toLocaleString('zh-TW', { timeZone: 'Asia/Taipei', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+      await sendLinePush(
+        tenantId, tenant.line_access_token, owner.line_uid,
+        `🔄 學生改期\n客戶：${booking.customer?.name}\n課程：${booking.course?.name}\n${oldT} → ${newT}\n（第 ${used + 1}/${freeChanges} 次）`,
+        'slot_changed', bookingId
+      );
+    }
+
+    res.json({ success: true, remaining: freeChanges - used - 1 });
+  } catch (error) {
+    console.error('[Bookings] Error rescheduling:', error);
+    res.status(500).json({ error: 'Failed', details: error.message });
+  }
+});
+
+// 計算時段實際未取消預約數
+async function countSlot(slotId) {
+  const { count } = await supabase
+    .from('bookings')
+    .select('id', { count: 'exact', head: true })
+    .eq('slot_id', slotId)
+    .neq('status', 'cancelled');
+  return count || 0;
+}
+
+/**
  * POST /api/bookings/package
  * 建立課程包預約（一期 N 堂，一次選 N 個時段，一次付清）
  * Body: { tenantId, lineUid, courseId, slotIds: [], customerName, customerPhone }
