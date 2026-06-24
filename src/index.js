@@ -6,6 +6,7 @@ import coursesRouter from './routes/courses.js';
 import bookingsRouter from './routes/bookings.js';
 import superadminRouter from './routes/superadmin.js';
 import adminRouter from './routes/admin.js';
+import classesRouter from './routes/classes.js';
 
 dotenv.config();
 
@@ -71,6 +72,9 @@ app.use('/api/superadmin', superadminRouter);
 
 // 業主後台（Owner Dashboard）
 app.use('/api/admin', adminRouter);
+
+// 固定班制（AFA 證照課）
+app.use('/api/classes', classesRouter);
 
 // ============================================================
 // 錯誤處理
