@@ -621,12 +621,8 @@ router.delete('/slots/:id', async (req, res) => {
       });
     }
 
-    // 先刪掉已取消的預約（避免外鍵擋住刪除）
-    await supabase
-      .from('bookings')
-      .delete()
-      .eq('slot_id', id)
-      .eq('status', 'cancelled');
+    // 無有效預約 → 清掉所有關聯預約（多為已取消），避免外鍵擋住
+    await supabase.from('bookings').delete().eq('slot_id', id);
 
     const { error } = await supabase
       .from('time_slots')
@@ -876,10 +872,10 @@ router.post('/slots/:id/cancel-class', async (req, res) => {
 
     if (!slot) return res.status(404).json({ error: 'Slot not found' });
 
-    // 取得所有未取消的預約
+    // 取得所有未取消的預約（含狀態，判斷是否已繳費）
     const { data: bookings } = await supabase
       .from('bookings')
-      .select('id, used_credit, customer:customer_id(id, line_uid, name, credits)')
+      .select('id, status, used_credit, customer:customer_id(id, line_uid, name, credits, membership_label)')
       .eq('slot_id', slotId)
       .eq('tenant_id', tenantId)
       .neq('status', 'cancelled');
@@ -892,18 +888,30 @@ router.post('/slots/:id/cancel-class', async (req, res) => {
 
     let notified = 0;
     for (const b of (bookings || [])) {
+      // 已繳費 = confirmed 或 pending_confirmation（已送出匯款）
+      const paid = ['confirmed', 'pending_confirmation'].includes(b.status);
+
       // 取消預約
       await supabase
         .from('bookings')
         .update({ status: 'cancelled', cancelled_at: new Date().toISOString(), cancelled_by: 'owner' })
         .eq('id', b.id);
 
-      // 會員退還堂數
-      if (b.used_credit && b.customer?.id) {
+      // 費用處理：會員退還堂數 / 已繳費保留為額度
+      let creditNote = '';
+      if (b.customer?.id && (b.used_credit || paid)) {
         await supabase
           .from('customers')
-          .update({ credits: (b.customer.credits || 0) + 1 })
+          .update({
+            credits: (b.customer.credits || 0) + 1,
+            membership_label: b.customer.membership_label || '課程保留額度',
+          })
           .eq('id', b.customer.id);
+        creditNote = b.used_credit
+          ? '已退還 1 堂課程額度，可預約其他日期或課程。\n'
+          : '您的費用已保留為 1 堂課程額度，可預約其他日期或課程 🌸\n';
+      } else if (!paid) {
+        creditNote = '此預約尚未完成匯款，已直接取消。\n';
       }
 
       // 推播通知
@@ -914,7 +922,7 @@ router.post('/slots/:id/cancel-class', async (req, res) => {
           `📚 ${slot.course?.name}\n` +
           `🕐 ${startTime}\n\n` +
           (reason ? `原因：${reason}\n\n` : '') +
-          (b.used_credit ? '已退還 1 堂課程額度。\n' : '如已付款，將安排退款，請聯絡業主。\n') +
+          creditNote +
           `造成不便敬請見諒。`;
 
         const ok = await sendLinePush(tenantId, tenant.line_access_token, b.customer.line_uid, msg, 'cancelled', b.id);
@@ -922,13 +930,11 @@ router.post('/slots/:id/cancel-class', async (req, res) => {
       }
     }
 
-    // 時段停用
-    await supabase
-      .from('time_slots')
-      .update({ is_active: false, booked_count: 0 })
-      .eq('id', slotId);
+    // 直接刪除時段（先清掉關聯的已取消預約避免外鍵）
+    await supabase.from('bookings').delete().eq('slot_id', slotId);
+    await supabase.from('time_slots').delete().eq('id', slotId).eq('tenant_id', tenantId);
 
-    console.log(`[Admin] Class cancelled: ${slotId}, notified ${notified}`);
+    console.log(`[Admin] Class cancelled + slot deleted: ${slotId}, notified ${notified}`);
     res.json({ success: true, cancelled: (bookings || []).length, notified });
   } catch (error) {
     console.error('[Admin] Error cancelling class:', error);
