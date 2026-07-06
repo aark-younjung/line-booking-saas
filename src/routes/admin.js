@@ -4,6 +4,19 @@ import { supabase } from '../lib/supabase.js';
 const router = express.Router();
 
 /**
+ * 刪除某時段的所有 bookings（先清掉 notifications_log 避免外鍵擋住）
+ */
+async function deleteBookingsBySlot(slotId) {
+  const { data: bks } = await supabase.from('bookings').select('id').eq('slot_id', slotId);
+  const ids = (bks || []).map(b => b.id);
+  if (ids.length === 0) return;
+  // notifications_log.booking_id 沒有 CASCADE，先清掉
+  await supabase.from('notifications_log').delete().in('booking_id', ids);
+  // payment_confirmations 有 CASCADE，會隨 bookings 一起刪
+  await supabase.from('bookings').delete().eq('slot_id', slotId);
+}
+
+/**
  * POST /api/admin/login
  * 業主登入
  * Body: { tenantId, email, password }
@@ -621,8 +634,8 @@ router.delete('/slots/:id', async (req, res) => {
       });
     }
 
-    // 無有效預約 → 清掉所有關聯預約（多為已取消），避免外鍵擋住
-    await supabase.from('bookings').delete().eq('slot_id', id);
+    // 無有效預約 → 清掉關聯資料後刪時段
+    await deleteBookingsBySlot(id);
 
     const { error } = await supabase
       .from('time_slots')
@@ -930,8 +943,8 @@ router.post('/slots/:id/cancel-class', async (req, res) => {
       }
     }
 
-    // 直接刪除時段（先清掉關聯的已取消預約避免外鍵）
-    await supabase.from('bookings').delete().eq('slot_id', slotId);
+    // 直接刪除時段（先清掉關聯的預約 + 推播紀錄避免外鍵）
+    await deleteBookingsBySlot(slotId);
     await supabase.from('time_slots').delete().eq('id', slotId).eq('tenant_id', tenantId);
 
     console.log(`[Admin] Class cancelled + slot deleted: ${slotId}, notified ${notified}`);
