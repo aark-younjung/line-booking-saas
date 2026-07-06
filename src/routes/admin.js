@@ -608,11 +608,25 @@ router.delete('/slots/:id', async (req, res) => {
       .eq('tenant_id', tenantId)
       .single();
 
-    if (slot && slot.booked_count > 0) {
+    // 檢查是否有「未取消」的預約
+    const { count: activeCount } = await supabase
+      .from('bookings')
+      .select('id', { count: 'exact', head: true })
+      .eq('slot_id', id)
+      .neq('status', 'cancelled');
+
+    if (activeCount && activeCount > 0) {
       return res.status(409).json({
-        error: `此時段已有 ${slot.booked_count} 筆預約，無法刪除`,
+        error: `此時段已有 ${activeCount} 筆預約，無法刪除`,
       });
     }
+
+    // 先刪掉已取消的預約（避免外鍵擋住刪除）
+    await supabase
+      .from('bookings')
+      .delete()
+      .eq('slot_id', id)
+      .eq('status', 'cancelled');
 
     const { error } = await supabase
       .from('time_slots')
