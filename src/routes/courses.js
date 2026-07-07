@@ -4,6 +4,26 @@ import { supabase } from '../lib/supabase.js';
 const router = express.Router();
 
 /**
+ * GET /api/courses/:tenantId/bank-info
+ * 取得租戶的匯款資訊（顧客付款頁顯示）
+ * 註：必須放在 /:tenantId 之前，避免被當成 courseId
+ */
+router.get('/:tenantId/bank-info', async (req, res) => {
+  const { tenantId } = req.params;
+  try {
+    const { data, error } = await supabase
+      .from('tenants')
+      .select('bank_name, bank_account, bank_account_name, payment_note')
+      .eq('id', tenantId)
+      .single();
+    if (error) throw error;
+    res.json({ success: true, data });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed', details: error.message });
+  }
+});
+
+/**
  * GET /api/courses/:tenantId
  * 取得租戶的所有課程
  */
