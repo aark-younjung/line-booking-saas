@@ -14,7 +14,7 @@ const router = express.Router();
  * Body: { tenantId, courseId, name, total_sessions, capacity, price }
  */
 router.post('/groups', async (req, res) => {
-  const { tenantId, courseId, name, total_sessions, capacity, price } = req.body;
+  const { tenantId, courseId, name, total_sessions, capacity, price, payment_note, installment_1 } = req.body;
   if (!tenantId || !courseId || !name) return res.status(400).json({ error: 'Missing fields' });
 
   try {
@@ -27,6 +27,8 @@ router.post('/groups', async (req, res) => {
         total_sessions: parseInt(total_sessions, 10) || 24,
         capacity: parseInt(capacity, 10) || 10,
         price: parseInt(price, 10) || 0,
+        payment_note: payment_note || null,
+        installment_1: installment_1 ? parseInt(installment_1, 10) : null,
         status: 'recruiting',
       })
       .select()
@@ -35,6 +37,30 @@ router.post('/groups', async (req, res) => {
     res.json({ success: true, data });
   } catch (error) {
     console.error('[Classes] create group:', error);
+    res.status(500).json({ error: 'Failed', details: error.message });
+  }
+});
+
+/**
+ * PATCH /api/classes/groups/:id  編輯班別
+ */
+router.patch('/groups/:id', async (req, res) => {
+  const { id } = req.params;
+  const { tenantId, name, capacity, price, payment_note, installment_1, status } = req.body;
+  if (!tenantId) return res.status(400).json({ error: 'Missing tenantId' });
+  try {
+    const updates = {};
+    if (name !== undefined) updates.name = name;
+    if (capacity !== undefined) updates.capacity = parseInt(capacity, 10);
+    if (price !== undefined) updates.price = parseInt(price, 10);
+    if (payment_note !== undefined) updates.payment_note = payment_note;
+    if (installment_1 !== undefined) updates.installment_1 = installment_1 ? parseInt(installment_1, 10) : null;
+    if (status !== undefined) updates.status = status;
+    const { data, error } = await supabase
+      .from('class_groups').update(updates).eq('id', id).eq('tenant_id', tenantId).select().single();
+    if (error) throw error;
+    res.json({ success: true, data });
+  } catch (error) {
     res.status(500).json({ error: 'Failed', details: error.message });
   }
 });
@@ -365,7 +391,7 @@ router.post('/enroll', async (req, res) => {
  */
 router.post('/enroll/:id/payment', async (req, res) => {
   const { id } = req.params;
-  const { tenantId, method, lastFiveDigits, amount } = req.body;
+  const { tenantId, method, lastFiveDigits, amount, note } = req.body;
   try {
     const tenant = await getTenantById(tenantId);
     const { data: enr } = await supabase
@@ -376,13 +402,17 @@ router.post('/enroll/:id/payment', async (req, res) => {
     await supabase.from('payment_confirmations').insert({
       tenant_id: tenantId, enrollment_id: id, method,
       last_five_digits: lastFiveDigits || null, amount: amount || enr.total_price,
+      note: note || null,
     });
-    await supabase.from('enrollments').update({ status: 'pending_confirmation' }).eq('id', id);
+    // 第一次匯款才把狀態改成待確認（第二期時已 confirmed 就不動）
+    if (enr.status === 'pending_payment') {
+      await supabase.from('enrollments').update({ status: 'pending_confirmation' }).eq('id', id);
+    }
 
     const { data: owner } = await supabase.from('owners').select('line_uid').eq('tenant_id', tenantId).single();
     if (owner?.line_uid) {
       await sendLinePush(tenantId, tenant.line_access_token, owner.line_uid,
-        `💰 證照課待確認匯款\n客戶：${enr.customer?.name}\n後五碼：${lastFiveDigits || '(截圖)'}\n金額：${amount || enr.total_price}`,
+        `💰 證照課待確認匯款\n客戶：${enr.customer?.name}\n${note ? note + '\n' : ''}後五碼：${lastFiveDigits || '(截圖)'}\n金額：${amount || enr.total_price}`,
         'payment_received', null);
     }
     res.json({ success: true });
@@ -405,7 +435,7 @@ router.get('/my', async (req, res) => {
 
     const { data: enrollments } = await supabase
       .from('enrollments')
-      .select('*, group:class_group_id(name, total_sessions, course:course_id(name))')
+      .select('*, group:class_group_id(id, name, total_sessions, price, installment_1, payment_note, course:course_id(name)), paid:payment_confirmations(amount, note)')
       .eq('tenant_id', tenantId).eq('customer_id', customer.id).neq('status', 'cancelled')
       .order('created_at', { ascending: false });
 
