@@ -155,16 +155,31 @@ router.post('/groups/:id/sessions', async (req, res) => {
  */
 router.delete('/groups/:id', async (req, res) => {
   const { id } = req.params;
-  const { tenantId } = req.query;
+  const { tenantId, force } = req.query;
   try {
     const { count } = await supabase
       .from('enrollments').select('id', { count: 'exact', head: true })
       .eq('class_group_id', id).neq('status', 'cancelled');
-    if (count && count > 0) return res.status(409).json({ error: `已有 ${count} 人報名，無法刪除` });
+
+    if (count && count > 0 && !force) {
+      return res.status(409).json({ error: `已有 ${count} 人報名，無法刪除`, hasEnrollments: count });
+    }
+
+    // 強制刪除：先清掉報名相關資料（attendance / payment_confirmations 會隨 enrollment CASCADE）
+    if (force) {
+      const { data: enrs } = await supabase.from('enrollments').select('id').eq('class_group_id', id);
+      const enrIds = (enrs || []).map(e => e.id);
+      if (enrIds.length) {
+        await supabase.from('attendance').delete().in('enrollment_id', enrIds);
+        await supabase.from('payment_confirmations').delete().in('enrollment_id', enrIds);
+        await supabase.from('enrollments').delete().eq('class_group_id', id);
+      }
+    }
 
     await supabase.from('class_groups').delete().eq('id', id).eq('tenant_id', tenantId);
     res.json({ success: true });
   } catch (error) {
+    console.error('[Classes] delete group:', error);
     res.status(500).json({ error: 'Failed', details: error.message });
   }
 });
