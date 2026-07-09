@@ -6,6 +6,113 @@ import { getTenantById } from '../middleware/tenant.js';
 const router = express.Router();
 
 /**
+ * POST /api/bookings/credit-enroll
+ * 堂數制報名（報名付 N 堂的錢，之後每次自己約課）
+ * Body: { tenantId, lineUid, courseId, customerName, customerPhone }
+ */
+router.post('/credit-enroll', async (req, res) => {
+  const { tenantId, lineUid, courseId, customerName, customerPhone } = req.body;
+  if (!tenantId || !lineUid || !courseId) return res.status(400).json({ error: 'Missing fields' });
+
+  try {
+    const tenant = await getTenantById(tenantId);
+    const { data: course } = await supabase
+      .from('courses').select('*').eq('id', courseId).eq('tenant_id', tenantId).single();
+    if (!course) return res.status(404).json({ error: 'Course not found' });
+
+    const { data: customer } = await supabase
+      .from('customers')
+      .upsert({ tenant_id: tenantId, line_uid: lineUid, display_name: customerName || '', name: customerName || '', phone: customerPhone || '' },
+        { onConflict: 'tenant_id,line_uid' })
+      .select().single();
+
+    // 防止重複報名（已有未取消的同課程 credit 包）
+    const { data: exist } = await supabase
+      .from('booking_packages').select('id')
+      .eq('customer_id', customer.id).eq('course_id', courseId).neq('status', 'cancelled').maybeSingle();
+    if (exist) return res.status(409).json({ error: '您已報名此課程' });
+
+    const sessions = course.package_sessions || 1;
+    const totalPrice = course.price * sessions;
+
+    const { data: pkg, error } = await supabase
+      .from('booking_packages')
+      .insert({ tenant_id: tenantId, customer_id: customer.id, course_id: courseId, status: 'pending_payment', total_price: totalPrice, sessions, remaining: null })
+      .select().single();
+    if (error) throw error;
+
+    let msg =
+      `✅ 報名成功！\n\n📚 ${course.name}（共 ${sessions} 堂）\n💰 應繳費用：NT$${totalPrice.toLocaleString()}\n` +
+      `請於 ${course.payment_days || 3} 日內完成匯款並回傳後五碼。\n確認後即可自行預約每堂上課日期。`;
+    if (course.notice) msg += `\n\n📋 報名注意事項：\n${course.notice}`;
+    await sendLinePush(tenantId, tenant.line_access_token, lineUid, msg, 'booking_created', null);
+
+    const { data: owner } = await supabase.from('owners').select('line_uid').eq('tenant_id', tenantId).single();
+    if (owner?.line_uid) {
+      await sendLinePush(tenantId, tenant.line_access_token, owner.line_uid,
+        `📌 新堂數制報名\n客戶：${customerName}\n課程：${course.name}（${sessions} 堂）\n金額：NT$${totalPrice.toLocaleString()}`,
+        'booking_created', null);
+    }
+
+    res.json({ success: true, data: { package_id: pkg.id, total_price: totalPrice } });
+  } catch (error) {
+    console.error('[Bookings] credit-enroll:', error);
+    res.status(500).json({ error: 'Failed', details: error.message });
+  }
+});
+
+/**
+ * POST /api/bookings/credit-book
+ * 堂數制：用剩餘堂數預約一堂課
+ * Body: { tenantId, lineUid, courseId, slotId }
+ */
+router.post('/credit-book', async (req, res) => {
+  const { tenantId, lineUid, courseId, slotId } = req.body;
+  if (!tenantId || !lineUid || !courseId || !slotId) return res.status(400).json({ error: 'Missing fields' });
+
+  try {
+    const tenant = await getTenantById(tenantId);
+    const { data: customer } = await supabase
+      .from('customers').select('id, name').eq('tenant_id', tenantId).eq('line_uid', lineUid).maybeSingle();
+    if (!customer) return res.status(404).json({ error: '找不到報名資料' });
+
+    // 找此課程已確認、還有剩餘堂數的包
+    const { data: pkg } = await supabase
+      .from('booking_packages').select('*')
+      .eq('customer_id', customer.id).eq('course_id', courseId).eq('status', 'confirmed')
+      .gt('remaining', 0).order('created_at', { ascending: true }).limit(1).maybeSingle();
+    if (!pkg) return res.status(409).json({ error: '沒有可用的剩餘堂數' });
+
+    // 檢查時段
+    const { data: slot } = await supabase
+      .from('time_slots').select('*').eq('id', slotId).eq('tenant_id', tenantId).single();
+    if (!slot) return res.status(404).json({ error: '時段不存在' });
+    if (slot.course_id !== courseId) return res.status(400).json({ error: '時段不屬於此課程' });
+    if (new Date(slot.start_at) <= new Date()) return res.status(400).json({ error: '不能預約過去的時段' });
+    if (slot.booked_count >= slot.capacity) return res.status(409).json({ error: '此時段已額滿' });
+
+    // 建立預約（confirmed，扣一堂）
+    const { data: booking, error: bErr } = await supabase
+      .from('bookings')
+      .insert({ tenant_id: tenantId, customer_id: customer.id, course_id: courseId, slot_id: slotId, status: 'confirmed', package_id: pkg.id, used_credit: true })
+      .select().single();
+    if (bErr) throw bErr;
+
+    await supabase.from('booking_packages').update({ remaining: pkg.remaining - 1 }).eq('id', pkg.id);
+
+    const { data: course } = await supabase.from('courses').select('name').eq('id', courseId).single();
+    await sendLinePush(tenantId, tenant.line_access_token, lineUid,
+      `✅ 預約成功！\n課程：${course?.name}\n時間：${new Date(slot.start_at).toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' })}\n剩餘 ${pkg.remaining - 1} 堂`,
+      'booking_created', booking.id);
+
+    res.json({ success: true, remaining: pkg.remaining - 1 });
+  } catch (error) {
+    console.error('[Bookings] credit-book:', error);
+    res.status(500).json({ error: 'Failed', details: error.message });
+  }
+});
+
+/**
  * GET /api/bookings/my
  * 學生查詢自己的課程包預約（LIFF 我的預約頁）
  * Query: tenantId, lineUid
@@ -28,7 +135,7 @@ router.get('/my', async (req, res) => {
     // 取得課程包
     const { data: pkgs } = await supabase
       .from('booking_packages')
-      .select('*, course:course_id(name, free_changes, lock_days, package_sessions)')
+      .select('*, course:course_id(name, free_changes, lock_days, package_sessions, course_type)')
       .eq('tenant_id', tenantId)
       .eq('customer_id', customer.id)
       .neq('status', 'cancelled')

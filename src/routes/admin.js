@@ -1038,17 +1038,25 @@ router.patch('/packages/:id/confirm', async (req, res) => {
 
     const { data: pkg } = await supabase
       .from('booking_packages')
-      .select('*, course:course_id(name), customer:customer_id(line_uid, name)')
+      .select('*, course:course_id(name, course_type), customer:customer_id(line_uid, name)')
       .eq('id', id).eq('tenant_id', tenantId).single();
     if (!pkg) return res.status(404).json({ error: 'Package not found' });
 
-    await supabase.from('booking_packages').update({ status: 'confirmed' }).eq('id', id);
+    const isCredit = pkg.course?.course_type === 'credit';
+
+    // credit（堂數制）確認時給予剩餘堂數；一般課程包則確認所有已選堂
+    const upd = { status: 'confirmed' };
+    if (isCredit) upd.remaining = pkg.sessions;
+    await supabase.from('booking_packages').update(upd).eq('id', id);
     await supabase.from('bookings').update({ status: 'confirmed' }).eq('package_id', id).neq('status', 'cancelled');
 
     if (pkg.customer?.line_uid) {
+      const extra = isCredit
+        ? `\n\n您有 ${pkg.sessions} 堂可預約，請至「我的預約」自行選擇上課日期 🌸`
+        : `\n\n期待見到您 🌸`;
       await sendLinePush(
         tenantId, tenant.line_access_token, pkg.customer.line_uid,
-        `✅ 報名確認完成！\n\n${pkg.customer?.name || ''} 您好，您報名的「${pkg.course?.name}」已收到款項，報名確認完成。\n\n期待見到您 🌸`,
+        `✅ 報名確認完成！\n\n${pkg.customer?.name || ''} 您好，您報名的「${pkg.course?.name}」已收到款項，報名確認完成。${extra}`,
         'confirmed', null
       );
     }
