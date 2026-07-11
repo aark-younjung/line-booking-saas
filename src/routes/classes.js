@@ -211,6 +211,36 @@ router.get('/enrollments', async (req, res) => {
 });
 
 /**
+ * DELETE /api/classes/enrollments/:id  取消/刪除報名（業主）
+ * 清掉出缺席、匯款紀錄，班別人數 -1
+ */
+router.delete('/enrollments/:id', async (req, res) => {
+  const { id } = req.params;
+  const { tenantId } = req.query;
+  if (!tenantId) return res.status(400).json({ error: 'Missing tenantId' });
+  try {
+    const { data: enr } = await supabase
+      .from('enrollments').select('class_group_id, status')
+      .eq('id', id).eq('tenant_id', tenantId).single();
+    if (!enr) return res.status(404).json({ error: 'Not found' });
+
+    await supabase.from('attendance').delete().eq('enrollment_id', id);
+    await supabase.from('payment_confirmations').delete().eq('enrollment_id', id);
+    await supabase.from('enrollments').delete().eq('id', id).eq('tenant_id', tenantId);
+
+    // 班別人數 -1（若原本非取消狀態）
+    if (enr.status !== 'cancelled') {
+      const { data: g } = await supabase.from('class_groups').select('enrolled_count').eq('id', enr.class_group_id).single();
+      if (g) await supabase.from('class_groups').update({ enrolled_count: Math.max(0, (g.enrolled_count || 0) - 1) }).eq('id', enr.class_group_id);
+    }
+    res.json({ success: true });
+  } catch (error) {
+    console.error('[Classes] delete enrollment:', error);
+    res.status(500).json({ error: 'Failed', details: error.message });
+  }
+});
+
+/**
  * GET /api/classes/enrollments/:id/payment
  */
 router.get('/enrollments/:id/payment', async (req, res) => {
