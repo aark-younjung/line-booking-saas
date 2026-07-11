@@ -33,7 +33,7 @@ router.post('/credit-enroll', async (req, res) => {
     if (exist) return res.status(409).json({ error: '您已報名此課程' });
 
     const sessions = course.package_sessions || 1;
-    const totalPrice = course.price * sessions;
+    const totalPrice = course.price;  // 堂數制：price 即整期總費用（不乘堂數）
 
     const { data: pkg, error } = await supabase
       .from('booking_packages')
