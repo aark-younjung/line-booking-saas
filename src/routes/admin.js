@@ -1023,6 +1023,35 @@ router.get('/packages/:id/payment', async (req, res) => {
 });
 
 /**
+ * DELETE /api/admin/packages/:id  取消/刪除課程包（業主）
+ * 清掉其下 bookings（含推播紀錄）、匯款紀錄，並釋放時段名額
+ */
+router.delete('/packages/:id', async (req, res) => {
+  const { id } = req.params;
+  const { tenantId } = req.query;
+  if (!tenantId) return res.status(400).json({ error: 'Missing tenantId' });
+  try {
+    // 取得其下 bookings（用 trigger 釋放 booked_count：先改 cancelled）
+    const { data: bks } = await supabase.from('bookings').select('id, status').eq('package_id', id);
+    for (const b of (bks || [])) {
+      if (b.status !== 'cancelled') {
+        await supabase.from('bookings').update({ status: 'cancelled' }).eq('id', b.id); // trigger 釋放名額
+      }
+    }
+    // 清推播紀錄後刪 bookings
+    const ids = (bks || []).map(b => b.id);
+    if (ids.length) await supabase.from('notifications_log').delete().in('booking_id', ids);
+    await supabase.from('bookings').delete().eq('package_id', id);
+    await supabase.from('payment_confirmations').delete().eq('package_id', id);
+    await supabase.from('booking_packages').delete().eq('id', id).eq('tenant_id', tenantId);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('[Admin] delete package:', error);
+    res.status(500).json({ error: 'Failed', details: error.message });
+  }
+});
+
+/**
  * PATCH /api/admin/packages/:id/confirm
  * 業主確認課程包匯款 → 所有堂數 confirmed
  */
