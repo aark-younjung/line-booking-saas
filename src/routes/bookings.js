@@ -135,7 +135,7 @@ router.get('/my', async (req, res) => {
     // 取得課程包
     const { data: pkgs } = await supabase
       .from('booking_packages')
-      .select('*, course:course_id(name, free_changes, lock_days, package_sessions, course_type)')
+      .select('*, course:course_id(name, free_changes, lock_days, package_sessions, course_type, price, installment_1, payment_note, image_url)')
       .eq('tenant_id', tenantId)
       .eq('customer_id', customer.id)
       .neq('status', 'cancelled')
