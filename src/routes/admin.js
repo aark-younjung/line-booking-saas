@@ -657,6 +657,45 @@ router.delete('/slots/:id', async (req, res) => {
   }
 });
 
+/**
+ * GET /api/admin/tenant  取得租戶設定（關於我們、匯款）
+ */
+router.get('/tenant', async (req, res) => {
+  const { tenantId } = req.query;
+  if (!tenantId) return res.status(400).json({ error: 'Missing tenantId' });
+  try {
+    const { data, error } = await supabase
+      .from('tenants')
+      .select('name, about, about_image_url, bank_name, bank_account, bank_account_name, payment_note')
+      .eq('id', tenantId).single();
+    if (error) throw error;
+    res.json({ success: true, data });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed', details: error.message });
+  }
+});
+
+/**
+ * PATCH /api/admin/tenant  更新租戶設定
+ * Body: { tenantId, about, about_image_url, bank_name, bank_account, bank_account_name, payment_note }
+ */
+router.patch('/tenant', async (req, res) => {
+  const { tenantId } = req.body;
+  if (!tenantId) return res.status(400).json({ error: 'Missing tenantId' });
+  try {
+    const updates = {};
+    for (const k of ['about', 'about_image_url', 'bank_name', 'bank_account', 'bank_account_name', 'payment_note']) {
+      if (req.body[k] !== undefined) updates[k] = req.body[k] || null;
+    }
+    const { data, error } = await supabase
+      .from('tenants').update(updates).eq('id', tenantId).select().single();
+    if (error) throw error;
+    res.json({ success: true, data });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed', details: error.message });
+  }
+});
+
 // ============================================================
 // 客戶管理（會員制 + 證照課堂數）
 // ============================================================

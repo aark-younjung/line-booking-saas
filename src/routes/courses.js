@@ -24,6 +24,25 @@ router.get('/:tenantId/bank-info', async (req, res) => {
 });
 
 /**
+ * GET /api/courses/:tenantId/tenant-info
+ * 取得租戶公開資訊（關於我們頁用）
+ */
+router.get('/:tenantId/tenant-info', async (req, res) => {
+  const { tenantId } = req.params;
+  try {
+    const { data, error } = await supabase
+      .from('tenants')
+      .select('name, about, about_image_url')
+      .eq('id', tenantId)
+      .single();
+    if (error) throw error;
+    res.json({ success: true, data });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed', details: error.message });
+  }
+});
+
+/**
  * GET /api/courses/:tenantId
  * 取得租戶的所有課程
  */
