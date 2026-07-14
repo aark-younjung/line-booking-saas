@@ -180,6 +180,7 @@ router.post('/courses', async (req, res) => {
         notice: notice || null,
         installment_1: req.body.installment_1 ? parseInt(req.body.installment_1, 10) : null,
         payment_note: req.body.payment_note || null,
+        intro_images: Array.isArray(req.body.intro_images) ? req.body.intro_images : [],
         is_active: true,
       })
       .select()
@@ -224,6 +225,7 @@ router.patch('/courses/:id', async (req, res) => {
     if (req.body.notice !== undefined) updates.notice = req.body.notice;
     if (req.body.installment_1 !== undefined) updates.installment_1 = req.body.installment_1 ? parseInt(req.body.installment_1, 10) : null;
     if (req.body.payment_note !== undefined) updates.payment_note = req.body.payment_note || null;
+    if (req.body.intro_images !== undefined) updates.intro_images = Array.isArray(req.body.intro_images) ? req.body.intro_images : [];
 
     const { data: course, error } = await supabase
       .from('courses')
