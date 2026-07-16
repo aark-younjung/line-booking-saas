@@ -32,7 +32,7 @@ router.get('/:tenantId/tenant-info', async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('tenants')
-      .select('name, about, about_image_url')
+      .select('name, about, about_image_url, course_banner_url')
       .eq('id', tenantId)
       .single();
     if (error) throw error;

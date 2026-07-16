@@ -668,7 +668,7 @@ router.get('/tenant', async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('tenants')
-      .select('name, about, about_image_url, bank_name, bank_account, bank_account_name, payment_note')
+      .select('name, about, about_image_url, course_banner_url, bank_name, bank_account, bank_account_name, payment_note')
       .eq('id', tenantId).single();
     if (error) throw error;
     res.json({ success: true, data });
@@ -686,7 +686,7 @@ router.patch('/tenant', async (req, res) => {
   if (!tenantId) return res.status(400).json({ error: 'Missing tenantId' });
   try {
     const updates = {};
-    for (const k of ['about', 'about_image_url', 'bank_name', 'bank_account', 'bank_account_name', 'payment_note']) {
+    for (const k of ['about', 'about_image_url', 'course_banner_url', 'bank_name', 'bank_account', 'bank_account_name', 'payment_note']) {
       if (req.body[k] !== undefined) updates[k] = req.body[k] || null;
     }
     const { data, error } = await supabase
