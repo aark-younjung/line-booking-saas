@@ -5,6 +5,14 @@ import { getTenantById } from '../middleware/tenant.js';
 
 const router = express.Router();
 
+// 繳費方式顯示名稱（推播給業主用）
+export const PAY_METHOD_LABEL = {
+  last_five: '銀行匯款',
+  cash: '現金',
+  linepay: 'LINE Pay',
+  screenshot: '截圖',
+};
+
 /**
  * POST /api/bookings/credit-enroll
  * 堂數制報名（報名付 N 堂的錢，之後每次自己約課）
@@ -419,11 +427,17 @@ router.post('/package/:id/payment', async (req, res) => {
       .eq('tenant_id', tenantId)
       .single();
     if (pkgErr || !pkg) return res.status(404).json({ error: 'Package not found' });
-    if (pkg.status !== 'pending_payment') {
+    // 允許第一次送出，以及業主確認前重新修改
+    if (!['pending_payment', 'pending_confirmation'].includes(pkg.status)) {
       return res.status(409).json({ error: `此報名狀態為 ${pkg.status}` });
     }
 
-    // 建立匯款記錄
+    // 重新送出時先清掉舊記錄
+    if (pkg.status === 'pending_confirmation') {
+      await supabase.from('payment_confirmations').delete().eq('package_id', packageId);
+    }
+
+    // 建立繳費記錄
     await supabase.from('payment_confirmations').insert({
       tenant_id: tenantId,
       booking_id: null,
@@ -443,7 +457,9 @@ router.post('/package/:id/payment', async (req, res) => {
     if (owner?.line_uid) {
       await sendLinePush(
         tenantId, tenant.line_access_token, owner.line_uid,
-        `💰 課程包待確認匯款\n客戶：${pkg.customer?.name}\n後五碼：${lastFiveDigits || '(截圖)'}\n金額：${amount || pkg.total_price}`,
+        `💰 課程包待確認繳費\n客戶：${pkg.customer?.name}\n方式：${PAY_METHOD_LABEL[method] || method}\n` +
+        (lastFiveDigits ? `後五碼：${lastFiveDigits}\n` : '') +
+        `金額：${amount || pkg.total_price}`,
         'payment_received', null
       );
     }
@@ -654,10 +670,16 @@ router.post('/:id/payment', async (req, res) => {
       });
     }
 
-    if (booking.status !== 'pending_payment') {
+    // 允許 pending_payment（第一次）與 pending_confirmation（業主還沒確認前可修改）
+    if (!['pending_payment', 'pending_confirmation'].includes(booking.status)) {
       return res.status(409).json({
         error: `Booking is in ${booking.status} status, cannot accept payment`,
       });
+    }
+
+    // 重新送出時，先清掉舊的繳費記錄（避免業主看到兩筆混淆）
+    if (booking.status === 'pending_confirmation') {
+      await supabase.from('payment_confirmations').delete().eq('booking_id', bookingId);
     }
 
     // 2. 建立匯款確認記錄
@@ -707,7 +729,8 @@ router.post('/:id/payment', async (req, res) => {
       const ownerMsg =
         `💰 待確認匯款\n` +
         `客戶：${customer?.name}\n` +
-        `方式：${method === 'last_five' ? '後五碼' : '截圖'}\n` +
+        `方式：${PAY_METHOD_LABEL[method] || method}\n` +
+        (lastFiveDigits ? `後五碼：${lastFiveDigits}\n` : '') +
         `金額：${amount || '(待填)'}`;
 
       await sendLinePush(

@@ -2,6 +2,7 @@ import express from 'express';
 import { supabase } from '../lib/supabase.js';
 import { sendLinePush } from '../utils/line.js';
 import { getTenantById } from '../middleware/tenant.js';
+import { PAY_METHOD_LABEL } from './bookings.js';
 
 const router = express.Router();
 
@@ -444,6 +445,11 @@ router.post('/enroll/:id/payment', async (req, res) => {
       .eq('id', id).eq('tenant_id', tenantId).single();
     if (!enr) return res.status(404).json({ error: 'Not found' });
 
+    // 業主還沒確認前重新送出 → 先清掉舊記錄（第二期繳費時 status 已 confirmed，不清）
+    if (enr.status === 'pending_confirmation') {
+      await supabase.from('payment_confirmations').delete().eq('enrollment_id', id);
+    }
+
     await supabase.from('payment_confirmations').insert({
       tenant_id: tenantId, enrollment_id: id, method,
       last_five_digits: lastFiveDigits || null, amount: amount || enr.total_price,
@@ -457,7 +463,9 @@ router.post('/enroll/:id/payment', async (req, res) => {
     const { data: owner } = await supabase.from('owners').select('line_uid').eq('tenant_id', tenantId).single();
     if (owner?.line_uid) {
       await sendLinePush(tenantId, tenant.line_access_token, owner.line_uid,
-        `💰 證照課待確認匯款\n客戶：${enr.customer?.name}\n${note ? note + '\n' : ''}後五碼：${lastFiveDigits || '(截圖)'}\n金額：${amount || enr.total_price}`,
+        `💰 證照課待確認繳費\n客戶：${enr.customer?.name}\n${note ? note + '\n' : ''}方式：${PAY_METHOD_LABEL[method] || method}\n` +
+        (lastFiveDigits ? `後五碼：${lastFiveDigits}\n` : '') +
+        `金額：${amount || enr.total_price}`,
         'payment_received', null);
     }
     res.json({ success: true });
