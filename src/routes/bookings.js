@@ -438,7 +438,7 @@ router.post('/package/:id/payment', async (req, res) => {
     }
 
     // 建立繳費記錄
-    await supabase.from('payment_confirmations').insert({
+    const { error: payErr } = await supabase.from('payment_confirmations').insert({
       tenant_id: tenantId,
       booking_id: null,
       package_id: packageId,
@@ -446,6 +446,7 @@ router.post('/package/:id/payment', async (req, res) => {
       last_five_digits: lastFiveDigits || null,
       amount: amount || pkg.total_price,
     });
+    if (payErr) throw payErr;
 
     // 更新 package + 所有 bookings 狀態
     await supabase.from('booking_packages').update({ status: 'pending_confirmation' }).eq('id', packageId);

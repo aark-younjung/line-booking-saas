@@ -450,11 +450,12 @@ router.post('/enroll/:id/payment', async (req, res) => {
       await supabase.from('payment_confirmations').delete().eq('enrollment_id', id);
     }
 
-    await supabase.from('payment_confirmations').insert({
+    const { error: payErr } = await supabase.from('payment_confirmations').insert({
       tenant_id: tenantId, enrollment_id: id, method,
       last_five_digits: lastFiveDigits || null, amount: amount || enr.total_price,
       note: note || null,
     });
+    if (payErr) throw payErr;
     // 第一次匯款才把狀態改成待確認（第二期時已 confirmed 就不動）
     if (enr.status === 'pending_payment') {
       await supabase.from('enrollments').update({ status: 'pending_confirmation' }).eq('id', id);
