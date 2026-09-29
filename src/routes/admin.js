@@ -177,6 +177,7 @@ router.post('/courses', async (req, res) => {
         payment_days: parseInt(payment_days, 10) || 3,
         free_changes: parseInt(free_changes, 10) || 2,
         lock_days: parseInt(lock_days, 10) || 3,
+        booking_cutoff_days: parseInt(req.body.booking_cutoff_days, 10) || 0,
         notice: notice || null,
         installment_1: req.body.installment_1 ? parseInt(req.body.installment_1, 10) : null,
         payment_note: req.body.payment_note || null,
@@ -222,6 +223,7 @@ router.patch('/courses/:id', async (req, res) => {
     if (req.body.payment_days !== undefined) updates.payment_days = parseInt(req.body.payment_days, 10);
     if (req.body.free_changes !== undefined) updates.free_changes = parseInt(req.body.free_changes, 10);
     if (req.body.lock_days !== undefined) updates.lock_days = parseInt(req.body.lock_days, 10);
+    if (req.body.booking_cutoff_days !== undefined) updates.booking_cutoff_days = parseInt(req.body.booking_cutoff_days, 10) || 0;
     if (req.body.notice !== undefined) updates.notice = req.body.notice;
     if (req.body.installment_1 !== undefined) updates.installment_1 = req.body.installment_1 ? parseInt(req.body.installment_1, 10) : null;
     if (req.body.payment_note !== undefined) updates.payment_note = req.body.payment_note || null;

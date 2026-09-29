@@ -95,10 +95,10 @@ router.get('/:tenantId/:courseId/slots', async (req, res) => {
     ninetyDaysLater.setDate(ninetyDaysLater.getDate() + 90);
     endDate = endDate || ninetyDaysLater.toISOString().split('T')[0];
 
-    // 確保課程屬於此租戶
+    // 確保課程屬於此租戶（順便取報名截止天數）
     const { data: course, error: courseError } = await supabase
       .from('courses')
-      .select('id')
+      .select('id, booking_cutoff_days')
       .eq('tenant_id', tenantId)
       .eq('id', courseId)
       .single();
@@ -109,6 +109,16 @@ router.get('/:tenantId/:courseId/slots', async (req, res) => {
       });
     }
 
+    // 報名截止：開課前 N 天之內的時段，學員端不顯示
+    // （鮮花課程要依人頭訂花材，太接近上課日才報名會來不及）
+    const cutoffDays = course.booking_cutoff_days || 0;
+    let earliest = new Date(`${startDate}T00:00:00Z`);
+    if (cutoffDays > 0) {
+      const limit = new Date();
+      limit.setDate(limit.getDate() + cutoffDays);
+      if (limit > earliest) earliest = limit;
+    }
+
     // 查詢時段
     const { data: slots, error: slotsError } = await supabase
       .from('time_slots')
@@ -116,7 +126,7 @@ router.get('/:tenantId/:courseId/slots', async (req, res) => {
       .eq('tenant_id', tenantId)
       .eq('course_id', courseId)
       .eq('is_active', true)
-      .gte('start_at', `${startDate}T00:00:00Z`)
+      .gte('start_at', earliest.toISOString())
       .lte('start_at', `${endDate}T23:59:59Z`)
       .order('start_at', { ascending: true });
 
