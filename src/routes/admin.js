@@ -1003,6 +1003,182 @@ router.post('/slots/:id/cancel-class', async (req, res) => {
 });
 
 /**
+ * 取消預約的共用處理
+ *
+ * 做三件事：釋出名額（靠 bookings 的觸發器）、處理已繳費用、通知學員。
+ * 名額不必手動加回去，status 改成 cancelled 時資料庫觸發器會自己減 booked_count。
+ */
+async function cancelBookingRows(tenantId, tenant, bookings, reason, headline) {
+  const { sendLinePush } = await import('../utils/line.js');
+  let notified = 0;
+
+  for (const b of bookings) {
+    // 已繳費 = 已確認，或已送出匯款資訊
+    const paid = ['confirmed', 'pending_confirmation'].includes(b.status);
+
+    await supabase
+      .from('bookings')
+      .update({ status: 'cancelled', cancelled_at: new Date().toISOString(), cancelled_by: 'owner' })
+      .eq('id', b.id);
+
+    // 已繳費 or 用會員堂數 → 保留成 1 堂額度，不讓學員白花錢
+    let creditNote = '';
+    if (b.customer?.id && (b.used_credit || paid)) {
+      await supabase
+        .from('customers')
+        .update({
+          credits: (b.customer.credits || 0) + 1,
+          membership_label: b.customer.membership_label || '課程保留額度',
+        })
+        .eq('id', b.customer.id);
+      creditNote = '您已繳的費用保留為 1 堂課程額度，可預約其他日期或課程 🌸\n';
+    }
+
+    if (b.customer?.line_uid) {
+      const start = b.slot?.start_at
+        ? new Date(b.slot.start_at).toLocaleString('zh-TW', {
+            timeZone: 'Asia/Taipei', month: '2-digit', day: '2-digit',
+            weekday: 'short', hour: '2-digit', minute: '2-digit'
+          })
+        : null;
+      const msg =
+        `${headline}\n\n` +
+        `${b.customer.name || ''} 您好，以下預約已為您取消：\n\n` +
+        `📚 ${b.course?.name || ''}\n` +
+        (start ? `🕐 ${start}\n` : '') +
+        `\n` +
+        (reason ? `原因：${reason}\n\n` : '') +
+        creditNote +
+        `如有問題歡迎直接回覆訊息 🙏`;
+
+      const ok = await sendLinePush(tenantId, tenant.line_access_token, b.customer.line_uid, msg, 'cancelled', b.id);
+      if (ok) notified++;
+    }
+  }
+
+  return notified;
+}
+
+/** 刪掉尚未確認的繳費紀錄（學員自己宣告但業主還沒核對，留著只會讓帳面混亂） */
+async function clearUnconfirmedPayment(filter) {
+  await supabase.from('payment_confirmations').delete().match(filter).is('confirmed_at', null);
+}
+
+/**
+ * POST /api/admin/bookings/:id/cancel
+ * 取消單筆預約（業主用）
+ * Body: { tenantId, reason? }
+ */
+router.post('/bookings/:id/cancel', async (req, res) => {
+  const { id } = req.params;
+  const { tenantId, reason } = req.body;
+  if (!tenantId) return res.status(400).json({ error: 'Missing tenantId' });
+
+  try {
+    const { getTenantById } = await import('../middleware/tenant.js');
+    const tenant = await getTenantById(tenantId);
+    if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
+
+    const { data: booking } = await supabase
+      .from('bookings')
+      .select('id, status, used_credit, package_id, slot:slot_id(start_at), course:course_id(name), customer:customer_id(id, line_uid, name, credits, membership_label)')
+      .eq('id', id)
+      .eq('tenant_id', tenantId)
+      .single();
+
+    if (!booking) return res.status(404).json({ error: 'Booking not found' });
+    if (booking.status === 'cancelled') return res.status(409).json({ error: '這筆預約已經取消過了' });
+
+    // 課程包要整包取消，不能只取消其中一堂（否則學員付了 4 堂卻只剩 3 堂）
+    if (booking.package_id) {
+      return res.status(409).json({
+        error: '這是課程包的其中一堂，請用「取消整個課程包」處理',
+        packageId: booking.package_id
+      });
+    }
+
+    const notified = await cancelBookingRows(tenantId, tenant, [booking], reason, '⚠️ 預約已取消');
+    await clearUnconfirmedPayment({ booking_id: id });
+
+    console.log(`[Admin] Booking cancelled: ${id}, notified ${notified}`);
+    res.json({ success: true, notified });
+  } catch (error) {
+    console.error('[Admin] Error cancelling booking:', error);
+    res.status(500).json({ error: 'Failed to cancel booking', details: error.message });
+  }
+});
+
+/**
+ * POST /api/admin/packages/:id/cancel
+ * 取消整個課程包（含底下所有堂次）
+ * Body: { tenantId, reason? }
+ */
+router.post('/packages/:id/cancel', async (req, res) => {
+  const { id } = req.params;
+  const { tenantId, reason } = req.body;
+  if (!tenantId) return res.status(400).json({ error: 'Missing tenantId' });
+
+  try {
+    const { getTenantById } = await import('../middleware/tenant.js');
+    const tenant = await getTenantById(tenantId);
+    if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
+
+    const { data: pkg } = await supabase
+      .from('booking_packages')
+      .select('id, status, sessions, course:course_id(name), customer:customers(name)')
+      .eq('id', id)
+      .eq('tenant_id', tenantId)
+      .single();
+
+    if (!pkg) return res.status(404).json({ error: 'Package not found' });
+    if (pkg.status === 'cancelled') return res.status(409).json({ error: '這個課程包已經取消過了' });
+
+    const { data: bookings } = await supabase
+      .from('bookings')
+      .select('id, status, used_credit, slot:slot_id(start_at), course:course_id(name), customer:customer_id(id, line_uid, name, credits, membership_label)')
+      .eq('package_id', id)
+      .eq('tenant_id', tenantId)
+      .neq('status', 'cancelled');
+
+    // 整包只發一次通知，不要每堂都發
+    const rows = bookings || [];
+    let notified = 0;
+    if (rows.length) {
+      const first = rows[0];
+      // 先靜靜取消全部（不通知）
+      await cancelBookingRows(tenantId, tenant, rows.map(r => ({ ...r, customer: { ...r.customer, line_uid: null } })), reason, '');
+      // 再對學員發一則整包的通知
+      const { sendLinePush } = await import('../utils/line.js');
+      if (first.customer?.line_uid) {
+        const msg =
+          `⚠️ 報名已取消\n\n` +
+          `${first.customer.name || ''} 您好，以下報名已為您取消：\n\n` +
+          `📚 ${pkg.course?.name}（共 ${pkg.sessions} 堂）\n\n` +
+          (reason ? `原因：${reason}\n\n` : '') +
+          `名額已釋出，如需重新報名歡迎再從選單進入 🌸\n` +
+          `如有問題歡迎直接回覆訊息 🙏`;
+        const ok = await sendLinePush(tenantId, tenant.line_access_token, first.customer.line_uid, msg, 'cancelled', first.id);
+        if (ok) notified = 1;
+      }
+    }
+
+    await supabase
+      .from('booking_packages')
+      .update({ status: 'cancelled', updated_at: new Date().toISOString() })
+      .eq('id', id)
+      .eq('tenant_id', tenantId);
+
+    await clearUnconfirmedPayment({ package_id: id });
+
+    console.log(`[Admin] Package cancelled: ${id}, ${rows.length} bookings, notified ${notified}`);
+    res.json({ success: true, cancelled: rows.length, notified });
+  } catch (error) {
+    console.error('[Admin] Error cancelling package:', error);
+    res.status(500).json({ error: 'Failed to cancel package', details: error.message });
+  }
+});
+
+/**
  * GET /api/admin/packages
  * 查詢課程包報名（業主用）
  * Query: tenantId, status (optional)

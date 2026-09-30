@@ -823,7 +823,8 @@ router.get('/:tenantId', async (req, res) => {
         *,
         customer:customer_id(id, name, phone, line_uid),
         course:course_id(name),
-        slot:slot_id(start_at)
+        slot:slot_id(start_at),
+        package:package_id(id, sessions, status)
       `
       )
       .eq('tenant_id', tenantId);
