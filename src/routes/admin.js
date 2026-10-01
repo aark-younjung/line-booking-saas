@@ -1,5 +1,6 @@
 import express from 'express';
 import { supabase } from '../lib/supabase.js';
+import { issueToken, checkPassword, requireOwner } from '../middleware/auth.js';
 
 const router = express.Router();
 
@@ -21,8 +22,8 @@ async function deleteBookingsBySlot(slotId) {
  * 業主登入
  * Body: { tenantId, email, password }
  *
- * ⚠️ 簡易版：目前不驗證 password hash（Phase 1 早期）
- * 之後改用 bcrypt + JWT
+ * 驗證密碼（scrypt）後發給一組 14 天有效的 token，
+ * 之後所有 /api/admin/* 請求都要帶 Authorization: Bearer <token>。
  */
 router.post('/login', async (req, res) => {
   const { tenantId, email, password } = req.body;
@@ -36,7 +37,7 @@ router.post('/login', async (req, res) => {
   try {
     const { data: owner, error } = await supabase
       .from('owners')
-      .select('id, tenant_id, email, name, line_uid')
+      .select('id, tenant_id, email, name, line_uid, password_hash')
       .eq('tenant_id', tenantId)
       .eq('email', email)
       .single();
@@ -49,14 +50,34 @@ router.post('/login', async (req, res) => {
       return res.status(400).json({ error: '請輸入密碼' });
     }
 
+    const result = checkPassword(password, owner.password_hash);
+    if (result === 'not_set') {
+      // 這個帳號還沒設定過真正的密碼，不默默放行
+      console.warn(`[Admin] 帳號尚未設定密碼：${owner.email}`);
+      return res.status(403).json({
+        error: '此帳號尚未設定密碼，請聯絡系統維護人員',
+        code: 'PASSWORD_NOT_SET'
+      });
+    }
+    if (result !== 'ok') {
+      console.warn(`[Admin] 密碼錯誤：${owner.email}`);
+      return res.status(401).json({ error: '帳號或密碼錯誤' });
+    }
+
+    const { password_hash, ...safeOwner } = owner;
+    const token = issueToken({ ownerId: owner.id, tenantId: owner.tenant_id });
     console.log(`[Admin] Owner login: ${owner.email}`);
 
-    res.json({ success: true, data: owner });
+    res.json({ success: true, data: { ...safeOwner, token } });
   } catch (error) {
     console.error('[Admin] Login error:', error);
     res.status(500).json({ error: '登入失敗', details: error.message });
   }
 });
+
+// ⚠️ 以下所有 /api/admin/* 路由都需要業主登入
+//    （login 在上面，不受此限）
+router.use(requireOwner);
 
 /**
  * GET /api/admin/bookings/:id/payment

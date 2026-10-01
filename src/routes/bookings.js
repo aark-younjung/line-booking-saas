@@ -1,5 +1,6 @@
 import express from 'express';
 import { supabase } from '../lib/supabase.js';
+import { requireOwner } from '../middleware/auth.js';
 import { sendLinePush } from '../utils/line.js';
 import { getTenantById } from '../middleware/tenant.js';
 
@@ -811,7 +812,7 @@ router.get('/customer/:lineUid', async (req, res) => {
  * GET /api/bookings/:tenantId
  * 業主查詢所有訂單（篩選選項）
  */
-router.get('/:tenantId', async (req, res) => {
+router.get('/:tenantId', requireOwner, async (req, res) => {
   const { tenantId } = req.params;
   const { status, courseId, limit = 50, offset = 0 } = req.query;
 
@@ -867,7 +868,7 @@ router.get('/:tenantId', async (req, res) => {
  * 業主改時段（同課程的其他時段）+ 推播通知客戶
  * Body: { tenantId, newSlotId }
  */
-router.patch('/:id/change-slot', async (req, res) => {
+router.patch('/:id/change-slot', requireOwner, async (req, res) => {
   const { id: bookingId } = req.params;
   const { tenantId, newSlotId } = req.body;
 
@@ -976,7 +977,7 @@ async function getSlotBookedCount(slotId) {
   return count || 0;
 }
 
-router.patch('/:id/confirm', async (req, res) => {
+router.patch('/:id/confirm', requireOwner, async (req, res) => {
   const { id: bookingId } = req.params;
   const { tenantId, ownerId } = req.body;
 

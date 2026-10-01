@@ -1,5 +1,6 @@
 import express from 'express';
 import { supabase } from '../lib/supabase.js';
+import { requireOwner } from '../middleware/auth.js';
 import { sendLinePush } from '../utils/line.js';
 import { getTenantById } from '../middleware/tenant.js';
 import { PAY_METHOD_LABEL } from './bookings.js';
@@ -14,7 +15,7 @@ const router = express.Router();
  * POST /api/classes/groups  建立班別
  * Body: { tenantId, courseId, name, total_sessions, capacity, price }
  */
-router.post('/groups', async (req, res) => {
+router.post('/groups', requireOwner, async (req, res) => {
   const { tenantId, courseId, name, total_sessions, capacity, price, payment_note, installment_1 } = req.body;
   if (!tenantId || !courseId || !name) return res.status(400).json({ error: 'Missing fields' });
 
@@ -45,7 +46,7 @@ router.post('/groups', async (req, res) => {
 /**
  * PATCH /api/classes/groups/:id  編輯班別
  */
-router.patch('/groups/:id', async (req, res) => {
+router.patch('/groups/:id', requireOwner, async (req, res) => {
   const { id } = req.params;
   const { tenantId, name, capacity, price, payment_note, installment_1, status } = req.body;
   if (!tenantId) return res.status(400).json({ error: 'Missing tenantId' });
@@ -70,7 +71,7 @@ router.patch('/groups/:id', async (req, res) => {
  * GET /api/classes/groups  列出班別（業主）
  * Query: tenantId, courseId (optional)
  */
-router.get('/groups', async (req, res) => {
+router.get('/groups', requireOwner, async (req, res) => {
   const { tenantId, courseId } = req.query;
   if (!tenantId) return res.status(400).json({ error: 'Missing tenantId' });
 
@@ -91,7 +92,7 @@ router.get('/groups', async (req, res) => {
 /**
  * GET /api/classes/groups/:id  班別詳情（含堂次 + 報名人數）
  */
-router.get('/groups/:id', async (req, res) => {
+router.get('/groups/:id', requireOwner, async (req, res) => {
   const { id } = req.params;
   const { tenantId } = req.query;
   if (!tenantId) return res.status(400).json({ error: 'Missing tenantId' });
@@ -117,7 +118,7 @@ router.get('/groups/:id', async (req, res) => {
  * Body: { tenantId, start_at, durationMin, weekly: true, count }
  *  - 從 start_at 開始，每週同一時間，連續 count 堂
  */
-router.post('/groups/:id/sessions', async (req, res) => {
+router.post('/groups/:id/sessions', requireOwner, async (req, res) => {
   const { id } = req.params;
   const { tenantId, start_at, durationMin, count } = req.body;
   if (!tenantId || !start_at || !count) return res.status(400).json({ error: 'Missing fields' });
@@ -154,7 +155,7 @@ router.post('/groups/:id/sessions', async (req, res) => {
 /**
  * DELETE /api/classes/groups/:id  刪除班別（無人報名才可）
  */
-router.delete('/groups/:id', async (req, res) => {
+router.delete('/groups/:id', requireOwner, async (req, res) => {
   const { id } = req.params;
   const { tenantId, force } = req.query;
   try {
@@ -193,7 +194,7 @@ router.delete('/groups/:id', async (req, res) => {
  * GET /api/classes/enrollments  報名清單（業主）
  * Query: tenantId, status, groupId
  */
-router.get('/enrollments', async (req, res) => {
+router.get('/enrollments', requireOwner, async (req, res) => {
   const { tenantId, status, groupId } = req.query;
   if (!tenantId) return res.status(400).json({ error: 'Missing tenantId' });
   try {
@@ -215,7 +216,7 @@ router.get('/enrollments', async (req, res) => {
  * DELETE /api/classes/enrollments/:id  取消/刪除報名（業主）
  * 清掉出缺席、匯款紀錄，班別人數 -1
  */
-router.delete('/enrollments/:id', async (req, res) => {
+router.delete('/enrollments/:id', requireOwner, async (req, res) => {
   const { id } = req.params;
   const { tenantId } = req.query;
   if (!tenantId) return res.status(400).json({ error: 'Missing tenantId' });
@@ -244,7 +245,7 @@ router.delete('/enrollments/:id', async (req, res) => {
 /**
  * GET /api/classes/enrollments/:id/payment
  */
-router.get('/enrollments/:id/payment', async (req, res) => {
+router.get('/enrollments/:id/payment', requireOwner, async (req, res) => {
   const { id } = req.params;
   const { tenantId } = req.query;
   try {
@@ -261,7 +262,7 @@ router.get('/enrollments/:id/payment', async (req, res) => {
 /**
  * PATCH /api/classes/enrollments/:id/confirm  確認報名匯款
  */
-router.patch('/enrollments/:id/confirm', async (req, res) => {
+router.patch('/enrollments/:id/confirm', requireOwner, async (req, res) => {
   const { id } = req.params;
   const { tenantId } = req.body;
   try {
@@ -291,7 +292,7 @@ router.patch('/enrollments/:id/confirm', async (req, res) => {
  * GET /api/classes/makeup-list  待補課清單（業主）
  * Query: tenantId
  */
-router.get('/makeup-list', async (req, res) => {
+router.get('/makeup-list', requireOwner, async (req, res) => {
   const { tenantId } = req.query;
   if (!tenantId) return res.status(400).json({ error: 'Missing tenantId' });
   try {
@@ -317,7 +318,7 @@ router.get('/makeup-list', async (req, res) => {
  * PATCH /api/classes/attendance/:id  業主更新出缺席（補課完成 / 出席）
  * Body: { tenantId, status }
  */
-router.patch('/attendance/:id', async (req, res) => {
+router.patch('/attendance/:id', requireOwner, async (req, res) => {
   const { id } = req.params;
   const { tenantId, status } = req.body;
   if (!['attended', 'makeup_done', 'scheduled', 'leave'].includes(status)) {
