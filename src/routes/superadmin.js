@@ -1,8 +1,50 @@
 import express from 'express';
 import { v4 as uuidv4 } from 'uuid';
+import crypto from 'crypto';
 import { supabase } from '../lib/supabase.js';
 
 const router = express.Router();
+
+/**
+ * Super Admin 驗證
+ *
+ * ⚠️ 2026-10 修補：這組路由原本完全沒有驗證，任何人只要知道網址就能
+ * 取得所有租戶資料，包含**明文的 LINE Channel Secret 與 Access Token**。
+ * 後端網址寫在公開的 LIFF 前端原始碼裡，等於金鑰公開在網路上。
+ *
+ * 現在一律需要 SUPERADMIN_KEY。沒設定環境變數時直接全部拒絕（fail closed），
+ * 不要改成「沒設定就放行」，那等於沒鎖。
+ */
+function requireSuperadmin(req, res, next) {
+  const expected = process.env.SUPERADMIN_KEY;
+  if (!expected) {
+    console.error('[Superadmin] SUPERADMIN_KEY 未設定，拒絕所有請求');
+    return res.status(503).json({ error: 'Super admin access is not configured' });
+  }
+  const given = req.get('x-superadmin-key') || '';
+  const a = Buffer.from(given);
+  const b = Buffer.from(expected);
+  // 長度不同時 timingSafeEqual 會丟錯，先比長度
+  const ok = a.length === b.length && crypto.timingSafeEqual(a, b);
+  if (!ok) {
+    console.warn(`[Superadmin] 拒絕未授權請求 ${req.method} ${req.path}`);
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  next();
+}
+
+router.use(requireSuperadmin);
+
+/** 回應一律不帶 LINE 金鑰，避免任何路徑再把它吐出去 */
+const SECRET_FIELDS = ['line_channel_secret', 'line_access_token'];
+function stripSecrets(row) {
+  if (!row || typeof row !== 'object') return row;
+  const out = { ...row };
+  for (const f of SECRET_FIELDS) {
+    if (f in out) out[f] = out[f] ? '***已設定***' : null;
+  }
+  return out;
+}
 
 /**
  * GET /api/superadmin/tenants
@@ -21,7 +63,7 @@ router.get('/tenants', async (req, res) => {
 
     res.json({
       success: true,
-      data: tenants,
+      data: (tenants || []).map(stripSecrets),
     });
   } catch (error) {
     console.error('[SuperAdmin] Error fetching tenants:', error);
@@ -103,7 +145,7 @@ router.post('/tenants', async (req, res) => {
     res.json({
       success: true,
       data: {
-        tenant,
+        tenant: stripSecrets(tenant),
         owner,
         tempPassword: ownerPassword,
       },
@@ -151,7 +193,7 @@ router.patch('/tenants/:id', async (req, res) => {
 
     res.json({
       success: true,
-      data: tenant,
+      data: stripSecrets(tenant),
     });
   } catch (error) {
     console.error('[SuperAdmin] Error updating tenant:', error);
