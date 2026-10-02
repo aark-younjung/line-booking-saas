@@ -712,6 +712,10 @@ router.patch('/tenant', async (req, res) => {
     for (const k of ['about', 'about_image_url', 'course_banner_url', 'bank_name', 'bank_account', 'bank_account_name', 'payment_note']) {
       if (req.body[k] !== undefined) updates[k] = req.body[k] || null;
     }
+    // 教室人數上限是數字，0 代表不限制，不能跟著上面轉成 null
+    if (req.body.room_capacity !== undefined) {
+      updates.room_capacity = parseInt(req.body.room_capacity, 10) || 0;
+    }
     const { data, error } = await supabase
       .from('tenants').update(updates).eq('id', tenantId).select().single();
     if (error) throw error;

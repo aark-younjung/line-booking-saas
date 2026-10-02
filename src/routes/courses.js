@@ -1,4 +1,5 @@
 import express from 'express';
+import { getRoomRemainingMap } from '../lib/roomCapacity.js';
 import { supabase } from '../lib/supabase.js';
 
 const router = express.Router();
@@ -135,11 +136,21 @@ router.get('/:tenantId/:courseId/slots', async (req, res) => {
     }
 
     // 計算可用名額
-    const slotsWithAvailability = slots.map((slot) => ({
-      ...slot,
-      available_seats: Math.max(0, slot.capacity - slot.booked_count),
-      is_available: slot.capacity > slot.booked_count,
-    }));
+    //
+    // 同一時間可能同時開了正式班與體驗課，兩者共用同一間教室。
+    // 剩餘名額取「時段自己的餘額」與「整間教室的餘額」較小者，
+    // 這樣正式班有人請假釋出位子時，體驗課會自動多出可報名數。
+    const roomMap = await getRoomRemainingMap(tenantId, slots.map(s => s.start_at));
+    const slotsWithAvailability = slots.map((slot) => {
+      const own = Math.max(0, slot.capacity - slot.booked_count);
+      const room = roomMap.get(slot.start_at);
+      const seats = Math.min(own, room === Infinity ? own : room);
+      return {
+        ...slot,
+        available_seats: seats,
+        is_available: seats > 0,
+      };
+    });
 
     res.json({
       success: true,

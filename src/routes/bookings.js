@@ -1,4 +1,5 @@
 import express from 'express';
+import { canTakeOneMore, getRoomRemainingMap } from '../lib/roomCapacity.js';
 import { supabase } from '../lib/supabase.js';
 import { requireOwner } from '../middleware/auth.js';
 import { sendLinePush } from '../utils/line.js';
@@ -98,7 +99,8 @@ router.post('/credit-book', async (req, res) => {
     if (!slot) return res.status(404).json({ error: '時段不存在' });
     if (slot.course_id !== courseId) return res.status(400).json({ error: '時段不屬於此課程' });
     if (new Date(slot.start_at) <= new Date()) return res.status(400).json({ error: '不能預約過去的時段' });
-    if (slot.booked_count >= slot.capacity) return res.status(409).json({ error: '此時段已額滿' });
+    const room1 = await canTakeOneMore(tenantId, slot);
+    if (!room1.ok) return res.status(409).json({ error: room1.reason });
 
     // 建立預約（confirmed，扣一堂）
     const { data: booking, error: bErr } = await supabase
@@ -226,7 +228,8 @@ router.patch('/:id/reschedule', async (req, res) => {
     if (!newSlot) return res.status(404).json({ error: '新時段不存在' });
     if (newSlot.course_id !== booking.course_id) return res.status(400).json({ error: '只能改到同課程的時段' });
     if (new Date(newSlot.start_at) <= new Date()) return res.status(400).json({ error: '不能選過去的時段' });
-    if (newSlot.booked_count >= newSlot.capacity) return res.status(409).json({ error: '新時段已額滿' });
+    const room2 = await canTakeOneMore(tenantId, newSlot);
+    if (!room2.ok) return res.status(409).json({ error: room2.reason.replace('此時段', '新時段') });
 
     const oldSlotId = booking.slot_id;
 
@@ -331,8 +334,10 @@ router.post('/package', async (req, res) => {
     if (slots.length !== slotIds.length) {
       return res.status(404).json({ error: '部分時段不存在' });
     }
+    // 同一時間可能同時開了其他課程，共用教室名額
+    const roomMap = await getRoomRemainingMap(tenantId, slots.map(s => s.start_at));
     for (const s of slots) {
-      if (s.booked_count >= s.capacity) {
+      if (s.booked_count >= s.capacity || roomMap.get(s.start_at) <= 0) {
         return res.status(409).json({ error: '部分時段已額滿，請重新選擇' });
       }
     }
@@ -528,10 +533,9 @@ router.post('/', async (req, res) => {
       });
     }
 
-    if (slot.booked_count >= slot.capacity) {
-      return res.status(409).json({
-        error: 'Time slot is full',
-      });
+    const room4 = await canTakeOneMore(tenantId, slot);
+    if (!room4.ok) {
+      return res.status(409).json({ error: room4.reason });
     }
 
     // 判斷會員：如果客戶有剩餘堂數 → 用會員身份預約（直接 confirmed，不用付款）
@@ -904,8 +908,9 @@ router.patch('/:id/change-slot', requireOwner, async (req, res) => {
     if (newSlot.course_id !== booking.course_id) {
       return res.status(400).json({ error: '只能改到同一個課程的時段' });
     }
-    if (newSlot.booked_count >= newSlot.capacity) {
-      return res.status(409).json({ error: '新時段已滿' });
+    const room5 = await canTakeOneMore(tenantId, newSlot);
+    if (!room5.ok) {
+      return res.status(409).json({ error: room5.reason.replace('此時段', '新時段') });
     }
 
     // 更新 booking 的 slot_id
