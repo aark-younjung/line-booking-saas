@@ -25,6 +25,78 @@ router.get('/:tenantId/bank-info', async (req, res) => {
 });
 
 /**
+ * GET /api/courses/:tenantId/oa-info
+ * 取得官方帳號資訊（LIFF 報名前檢查好友用）
+ *
+ * 加好友網址需要官方帳號的 basic ID（@xxxx）。不要人工填寫，
+ * 直接用租戶自己的 access token 問 LINE（GET /v2/bot/info），
+ * 這樣換官方帳號或新增租戶都不必改設定。結果快取 10 分鐘。
+ *
+ * 回應不含任何金鑰。
+ * 註：必須放在 /:tenantId 之前，避免被當成 courseId
+ */
+// 只快取向 LINE 問到的官方帳號資訊（basic ID 幾乎不會變）。
+// 租戶設定每次都讀最新的，業主改「好友檢查模式」才會立刻生效。
+const botInfoCache = new Map();
+const BOT_INFO_TTL = 60 * 60 * 1000;
+
+async function getBotInfo(tenantId, accessToken) {
+  if (!accessToken) return null;
+
+  const cached = botInfoCache.get(tenantId);
+  if (cached && Date.now() - cached.at < BOT_INFO_TTL) return cached.info;
+
+  try {
+    const r = await fetch('https://api.line.me/v2/bot/info', {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (!r.ok) {
+      console.warn(`[OA] /v2/bot/info returned ${r.status} for tenant ${tenantId}`);
+      return cached?.info || null;
+    }
+    const info = await r.json();
+    botInfoCache.set(tenantId, { info, at: Date.now() });
+    return info;
+  } catch (err) {
+    console.warn('[OA] Failed to fetch bot info:', err.message);
+    return cached?.info || null;
+  }
+}
+
+router.get('/:tenantId/oa-info', async (req, res) => {
+  const { tenantId } = req.params;
+
+  try {
+    const { data: tenant, error } = await supabase
+      .from('tenants')
+      .select('line_access_token, friend_check_mode, liff_id, trial_course_id')
+      .eq('id', tenantId)
+      .single();
+    if (error) throw error;
+
+    const info = await getBotInfo(tenantId, tenant.line_access_token);
+    const basicId = info?.basicId || null;
+
+    res.json({
+      success: true,
+      data: {
+        basic_id: basicId,
+        display_name: info?.displayName || null,
+        picture_url: info?.pictureUrl || null,
+        // 取不到 basic_id 就沒有加好友網址，前端據此判斷「不要擋報名」
+        add_friend_url: basicId ? `https://line.me/R/ti/p/${encodeURIComponent(basicId)}` : null,
+        friend_check_mode: tenant.friend_check_mode === 'remind' ? 'remind' : 'force',
+        liff_id: tenant.liff_id || null,
+        trial_course_id: tenant.trial_course_id || null,
+      },
+    });
+  } catch (error) {
+    console.error('[OA] Error fetching OA info:', error);
+    res.status(500).json({ error: 'Failed to fetch OA info', details: error.message });
+  }
+});
+
+/**
  * GET /api/courses/:tenantId/tenant-info
  * 取得租戶公開資訊（關於我們頁用）
  */

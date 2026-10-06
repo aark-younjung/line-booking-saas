@@ -167,26 +167,63 @@ async function handleFollowEvent(event, tenant, tenantId) {
 
   console.log(`[Webhook] Customer record upserted: ${data.id}`);
 
-  // 歡迎訊息 + 引導填寫個人資料
-  const liffId = '2010061490-DycuG3uU';
-  const welcomeMsg =
-    '👋 歡迎加入蘇莉花藝！\n\n' +
-    '為了之後預約方便，請先填寫您的聯絡資料：\n' +
-    `https://liff.line.me/${liffId}/profile\n\n` +
-    '或直接從下方選單預約課程 🌸';
-
   await replyLineMessage(
     event.replyToken,
     tenant.line_access_token,
-    welcomeMsg
+    buildWelcomeMessage(tenant)
   );
 }
 
 /**
- * 回覆 LINE 訊息
+ * 組出加好友歡迎訊息
+ *
+ * 從 FB 粉專、搜尋 ID、一般 QR code 加好友的人，LINE 加完只會停在聊天室，
+ * 沒辦法自動跳頁。用按鈕讓對方點一下就到體驗課的選時段頁。
+ *
+ * 課程 id、LIFF id、文案都放在租戶設定裡，不寫死在程式。
+ * 缺任何一項就退回純文字，不要讓歡迎訊息整個發不出去。
  */
-async function replyLineMessage(replyToken, accessToken, text) {
+function buildWelcomeMessage(tenant) {
+  const text =
+    tenant.welcome_message ||
+    `歡迎加入${tenant.name || '我們'}。\n有任何想問的都可以直接在這裡留言。`;
+
+  const liffId = tenant.liff_id;
+  if (!liffId) {
+    console.warn('[Webhook] tenant.liff_id 未設定，歡迎訊息退回純文字');
+    return { type: 'text', text };
+  }
+
+  const actions = [];
+  if (tenant.trial_course_id) {
+    actions.push({
+      type: 'uri',
+      label: '預約體驗課',
+      uri: `https://liff.line.me/${liffId}/slots/${tenant.trial_course_id}`,
+    });
+  }
+  actions.push({
+    type: 'uri',
+    label: '填寫聯絡資料',
+    uri: `https://liff.line.me/${liffId}/profile`,
+  });
+
+  return {
+    type: 'template',
+    // 不支援樣板訊息的環境（電腦版舊版、通知列）看到的是這段文字
+    altText: text,
+    template: { type: 'buttons', text, actions },
+  };
+}
+
+/**
+ * 回覆 LINE 訊息
+ * @param message 字串（純文字）或 LINE message 物件（樣板、Flex 等）
+ */
+async function replyLineMessage(replyToken, accessToken, message) {
   try {
+    const payload = typeof message === 'string' ? { type: 'text', text: message } : message;
+
     const response = await fetch('https://api.line.me/v2/bot/message/reply', {
       method: 'POST',
       headers: {
@@ -195,17 +232,14 @@ async function replyLineMessage(replyToken, accessToken, text) {
       },
       body: JSON.stringify({
         replyToken,
-        messages: [
-          {
-            type: 'text',
-            text,
-          },
-        ],
+        messages: [payload],
       }),
     });
 
     if (!response.ok) {
-      throw new Error(`LINE API returned ${response.status}`);
+      // 樣板訊息格式錯誤時 LINE 會回 400 並說明原因，印出來才查得到
+      const detail = await response.text().catch(() => '');
+      throw new Error(`LINE API returned ${response.status} ${detail}`);
     }
 
     console.log(`[Webhook] Reply sent successfully`);

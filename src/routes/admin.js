@@ -75,8 +75,79 @@ router.post('/login', async (req, res) => {
   }
 });
 
+/**
+ * GET /api/admin/customer/profile
+ * 取得客戶個人資料（LIFF 用，顧客自己呼叫）
+ * Query: tenantId, lineUid
+ *
+ * ⚠️ 這兩條是顧客端（LIFF）在用的，必須放在 requireOwner 之前。
+ *    10/02 加上驗證時誤放在下面，導致 LIFF 的「填寫聯絡資料」
+ *    與報名頁自動帶入姓名電話全部回 401。
+ */
+router.get('/customer/profile', async (req, res) => {
+  const { tenantId, lineUid } = req.query;
+
+  if (!tenantId || !lineUid) {
+    return res.status(400).json({ error: 'Missing tenantId or lineUid' });
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from('customers')
+      .select('id, line_uid, display_name, name, phone, credits, membership_label')
+      .eq('tenant_id', tenantId)
+      .eq('line_uid', lineUid)
+      .maybeSingle();
+
+    if (error) throw error;
+
+    res.json({ success: true, data: data || null });
+  } catch (error) {
+    console.error('[Admin] Error fetching customer profile:', error);
+    res.status(500).json({ error: 'Failed to fetch profile', details: error.message });
+  }
+});
+
+/**
+ * POST /api/admin/customer/profile
+ * 更新客戶個人資料（LIFF 用，顧客自己呼叫）
+ * Body: { tenantId, lineUid, name, phone, displayName }
+ */
+router.post('/customer/profile', async (req, res) => {
+  const { tenantId, lineUid, name, phone, displayName } = req.body;
+
+  if (!tenantId || !lineUid) {
+    return res.status(400).json({ error: 'Missing tenantId or lineUid' });
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from('customers')
+      .upsert(
+        {
+          tenant_id: tenantId,
+          line_uid: lineUid,
+          name: name || null,
+          phone: phone || null,
+          display_name: displayName || null,
+        },
+        { onConflict: 'tenant_id,line_uid' }
+      )
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    console.log(`[Admin] Customer profile updated: ${lineUid}`);
+    res.json({ success: true, data });
+  } catch (error) {
+    console.error('[Admin] Error updating customer profile:', error);
+    res.status(500).json({ error: 'Failed to update profile', details: error.message });
+  }
+});
+
 // ⚠️ 以下所有 /api/admin/* 路由都需要業主登入
-//    （login 在上面，不受此限）
+//    （login 與上面兩條顧客端 /customer/profile 在上面，不受此限）
 router.use(requireOwner);
 
 /**
@@ -515,73 +586,6 @@ router.get('/slots/:id/customers', async (req, res) => {
 });
 
 /**
- * GET /api/admin/customer/profile
- * 取得客戶個人資料（LIFF 用）
- * Query: tenantId, lineUid
- */
-router.get('/customer/profile', async (req, res) => {
-  const { tenantId, lineUid } = req.query;
-
-  if (!tenantId || !lineUid) {
-    return res.status(400).json({ error: 'Missing tenantId or lineUid' });
-  }
-
-  try {
-    const { data, error } = await supabase
-      .from('customers')
-      .select('id, line_uid, display_name, name, phone, credits, membership_label')
-      .eq('tenant_id', tenantId)
-      .eq('line_uid', lineUid)
-      .maybeSingle();
-
-    if (error) throw error;
-
-    res.json({ success: true, data: data || null });
-  } catch (error) {
-    console.error('[Admin] Error fetching customer profile:', error);
-    res.status(500).json({ error: 'Failed to fetch profile', details: error.message });
-  }
-});
-
-/**
- * POST /api/admin/customer/profile
- * 更新客戶個人資料（LIFF 用）
- * Body: { tenantId, lineUid, name, phone, displayName }
- */
-router.post('/customer/profile', async (req, res) => {
-  const { tenantId, lineUid, name, phone, displayName } = req.body;
-
-  if (!tenantId || !lineUid) {
-    return res.status(400).json({ error: 'Missing tenantId or lineUid' });
-  }
-
-  try {
-    const { data, error } = await supabase
-      .from('customers')
-      .upsert(
-        {
-          tenant_id: tenantId,
-          line_uid: lineUid,
-          name: name || null,
-          phone: phone || null,
-          display_name: displayName || null,
-        },
-        { onConflict: 'tenant_id,line_uid' }
-      )
-      .select()
-      .single();
-
-    if (error) throw error;
-
-    console.log(`[Admin] Customer profile updated: ${lineUid}`);
-    res.json({ success: true, data });
-  } catch (error) {
-    console.error('[Admin] Error updating customer profile:', error);
-    res.status(500).json({ error: 'Failed to update profile', details: error.message });
-  }
-});
-
-/**
  * POST /api/admin/slots/batch
  * 批量新增時段（連續週次）
  * Body: { tenantId, courseId, start_at, end_at, capacity, weeks }
@@ -709,12 +713,16 @@ router.patch('/tenant', async (req, res) => {
   if (!tenantId) return res.status(400).json({ error: 'Missing tenantId' });
   try {
     const updates = {};
-    for (const k of ['about', 'about_image_url', 'course_banner_url', 'bank_name', 'bank_account', 'bank_account_name', 'payment_note']) {
+    for (const k of ['about', 'about_image_url', 'course_banner_url', 'bank_name', 'bank_account', 'bank_account_name', 'payment_note', 'trial_course_id', 'welcome_message']) {
       if (req.body[k] !== undefined) updates[k] = req.body[k] || null;
     }
     // 教室人數上限是數字，0 代表不限制，不能跟著上面轉成 null
     if (req.body.room_capacity !== undefined) {
       updates.room_capacity = parseInt(req.body.room_capacity, 10) || 0;
+    }
+    // 好友檢查模式只有兩個合法值（DB 也有 CHECK，這裡先擋掉避免整筆更新失敗）
+    if (req.body.friend_check_mode !== undefined) {
+      updates.friend_check_mode = req.body.friend_check_mode === 'remind' ? 'remind' : 'force';
     }
     const { data, error } = await supabase
       .from('tenants').update(updates).eq('id', tenantId).select().single();
