@@ -20,6 +20,15 @@ export const sendLinePush = async (
   let lastError = null;
   let retryCount = 0;
 
+  // 店家還沒串 LINE（沒有 access token）或對象沒有 LINE UID：直接跳過。
+  // 原本照樣重試 4 次、等約 6 秒，業主在後台按「確認匯款」會卡 6 秒才有反應，
+  // 示範帳號、剛開通還沒設定 LINE 的店家都會遇到。重試是為了網路暫時失敗，
+  // 缺設定不是暫時的，重試也不會成功。
+  if (!lineAccessToken || !targetLineUid) {
+    console.warn(`[LINE Push] 略過（${!lineAccessToken ? '店家未設定 LINE token' : '對象沒有 LINE UID'}）tenant=${tenantId} event=${eventType}`);
+    return false;
+  }
+
   // 建立通知紀錄
   const { data: notifLog } = await supabase
     .from('notifications_log')
