@@ -30,8 +30,11 @@ build_and_deploy () {
   cd "$DEST"
   [ -d node_modules ] || npm install --no-audit --no-fund > /dev/null
   npx vite build 2>&1 | tail -3
-  # 第一次部署要先建專案；已存在會回錯誤，忽略
-  npx wrangler pages project create "$PROJECT" --production-branch=main > /dev/null 2>&1 || true
+  # 第一次部署要先建專案；已存在會回錯誤，忽略。
+  # --force：新版 wrangler 預設把 Pages 轉建成 Workers，但 Workers 不接受 public/_redirects 的
+  # 「/* /index.html 200」（判定為無限轉址），會建立失敗。--force 建成傳統 Pages（跟 suli-* 一樣），
+  # 只有建立時需要，之後的 deploy 不用加。
+  npx wrangler pages project create "$PROJECT" --production-branch=main --force > /dev/null 2>&1 || true
   npx wrangler pages deploy dist --project-name="$PROJECT" --commit-dirty=true 2>&1 | tail -2
   cd - > /dev/null
 }
