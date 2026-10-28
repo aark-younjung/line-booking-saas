@@ -25,7 +25,7 @@ build_and_deploy () {
   echo ""; echo "=== $PROJECT ==="
   # robocopy 成功時回傳 1，>= 8 才是錯誤
   robocopy "$(cygpath -w "$ROOT/$SRC")" "$(cygpath -w "$DEST")" \
-    /MIR /XD node_modules dist .wrangler /XF .env /NFL /NDL /NJH /NJS /NP > /dev/null || [ $? -lt 8 ]
+    /E /XD node_modules dist .wrangler /XF .env /NFL /NDL /NJH /NJS /NP > /dev/null || [ $? -lt 8 ]
   printf "%s\n" "$ENVTEXT" > "$DEST/.env"
   cd "$DEST"
   [ -d node_modules ] || npm install --no-audit --no-fund > /dev/null
