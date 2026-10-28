@@ -1,6 +1,6 @@
 import express from 'express';
 import { supabase } from '../lib/supabase.js';
-import { issueToken, checkPassword, requireOwner } from '../middleware/auth.js';
+import { issueToken, checkPassword, requireOwner, requireCron } from '../middleware/auth.js';
 
 const router = express.Router();
 
@@ -148,7 +148,24 @@ router.post('/customer/profile', async (req, res) => {
 
 // ⚠️ 以下所有 /api/admin/* 路由都需要業主登入
 //    （login 與上面兩條顧客端 /customer/profile 在上面，不受此限）
-router.use(requireOwner);
+//
+//    例外：每日排程（Cloudflare Worker）沒有業主 token，改用 x-cron-key。
+//    只有這三條接受排程金鑰；業主登入後一樣可以手動觸發。
+const CRON_PATHS = new Set(['/reminders/run', '/payment-check/run', '/cron/ping']);
+router.use((req, res, next) => {
+  if (req.method === 'POST' && CRON_PATHS.has(req.path) && req.get('x-cron-key')) {
+    return requireCron(req, res, next);
+  }
+  return requireOwner(req, res, next);
+});
+
+/**
+ * POST /api/admin/cron/ping
+ * 只驗證排程金鑰，不做任何事。用來確認排程設定正確，不會真的發提醒。
+ */
+router.post('/cron/ping', (req, res) => {
+  res.json({ success: true, tenantId: req.body.tenantId, via: req.cron ? 'cron' : 'owner' });
+});
 
 /**
  * GET /api/admin/bookings/:id/payment

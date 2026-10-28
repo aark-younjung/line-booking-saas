@@ -81,6 +81,35 @@ export function checkPassword(plain, stored) {
   }
 }
 
+// ── 排程（Cloudflare Worker cron）────────────────────────
+
+/**
+ * 每個租戶各自一把排程金鑰：HMAC(簽章金鑰, 'cron:' + tenantId)。
+ * 不用另外存，後端隨時算得出來；A 店的金鑰也不能拿去觸發 B 店的提醒。
+ *
+ * ⚠️ 2026-10-28：10/02 幫 /api/admin/* 加登入驗證時，排程呼叫的
+ * /reminders/run、/payment-check/run 也一起被鎖住（排程沒有業主 token），
+ * 導致 10/02 起課前提醒、課程包催款、逾期釋出名額全部停擺。
+ */
+export function cronKey(tenantId) {
+  return crypto.createHmac('sha256', secret()).update(`cron:${tenantId}`).digest('base64url');
+}
+
+export function requireCron(req, res, next) {
+  const tenantId = req.body?.tenantId;
+  if (!tenantId) return res.status(400).json({ error: 'Missing tenantId' });
+
+  const given = Buffer.from(req.get('x-cron-key') || '');
+  const expected = Buffer.from(cronKey(tenantId));
+  if (given.length !== expected.length || !crypto.timingSafeEqual(given, expected)) {
+    console.warn(`[Auth] 排程金鑰錯誤：tenant=${tenantId}`);
+    return res.status(401).json({ error: 'Invalid cron key', code: 'UNAUTHORIZED' });
+  }
+
+  req.cron = { tenantId };
+  next();
+}
+
 // ── 中介層 ────────────────────────────────────────────
 
 /**
