@@ -141,12 +141,12 @@ router.get('/my', async (req, res) => {
       .eq('line_uid', lineUid)
       .maybeSingle();
 
-    if (!customer) return res.json({ success: true, data: [] });
+    if (!customer) return res.json({ success: true, data: [], singles: [] });
 
     // 取得課程包
     const { data: pkgs } = await supabase
       .from('booking_packages')
-      .select('*, course:course_id(name, free_changes, lock_days, package_sessions, course_type, price, installment_1, payment_note, image_url)')
+      .select('*, course:course_id(name, free_changes, lock_days, package_sessions, course_type, price, installment_1, installment_2_when, payment_note, image_url)')
       .eq('tenant_id', tenantId)
       .eq('customer_id', customer.id)
       .neq('status', 'cancelled')
@@ -168,7 +168,28 @@ router.get('/my', async (req, res) => {
       return { ...pkg, bookings };
     }));
 
-    res.json({ success: true, data: result });
+    // 單堂課（沒有 package_id 的預約）
+    // ⚠️ 2026-10-28 補：原本「我的預約」只查課程包與證照班，單堂體驗課的學員
+    //    打開會看到「還沒有報名紀錄」，也沒有地方繼續繳費。
+    //    顯示「還沒上課的」，以及「尚未完成繳費流程的」（不論日期）。
+    const { data: singleRows } = await supabase
+      .from('bookings')
+      .select('id, status, created_at, course:course_id(id, name, price, course_type, image_url), slot:slot_id(id, start_at, end_at)')
+      .eq('tenant_id', tenantId)
+      .eq('customer_id', customer.id)
+      .is('package_id', null)
+      .neq('status', 'cancelled');
+
+    const now = Date.now();
+    const singles = (singleRows || [])
+      .filter(b => b.slot && (
+        new Date(b.slot.end_at || b.slot.start_at).getTime() >= now ||
+        ['pending_payment', 'pending_confirmation'].includes(b.status)
+      ))
+      .sort((a, b) => new Date(a.slot.start_at) - new Date(b.slot.start_at));
+
+    // singles 另外放一個欄位，data 維持原本格式，舊版前端不受影響
+    res.json({ success: true, data: result, singles });
   } catch (error) {
     console.error('[Bookings] Error fetching my bookings:', error);
     res.status(500).json({ error: 'Failed', details: error.message });

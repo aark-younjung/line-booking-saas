@@ -1,6 +1,8 @@
 import express from 'express';
 import { supabase } from '../lib/supabase.js';
 import { issueToken, checkPassword, requireOwner, requireCron } from '../middleware/auth.js';
+import { getTenantById } from '../middleware/tenant.js';
+import { runReminders, runPaymentCheck } from '../lib/dailyJobs.js';
 
 const router = express.Router();
 
@@ -289,6 +291,7 @@ router.post('/courses', async (req, res) => {
         booking_cutoff_days: parseInt(req.body.booking_cutoff_days, 10) || 0,
         notice: notice || null,
         installment_1: req.body.installment_1 ? parseInt(req.body.installment_1, 10) : null,
+        installment_2_when: req.body.installment_2_when || null,
         payment_note: req.body.payment_note || null,
         intro_images: Array.isArray(req.body.intro_images) ? req.body.intro_images : [],
         is_active: true,
@@ -335,6 +338,7 @@ router.patch('/courses/:id', async (req, res) => {
     if (req.body.booking_cutoff_days !== undefined) updates.booking_cutoff_days = parseInt(req.body.booking_cutoff_days, 10) || 0;
     if (req.body.notice !== undefined) updates.notice = req.body.notice;
     if (req.body.installment_1 !== undefined) updates.installment_1 = req.body.installment_1 ? parseInt(req.body.installment_1, 10) : null;
+    if (req.body.installment_2_when !== undefined) updates.installment_2_when = req.body.installment_2_when || null;
     if (req.body.payment_note !== undefined) updates.payment_note = req.body.payment_note || null;
     if (req.body.intro_images !== undefined) updates.intro_images = Array.isArray(req.body.intro_images) ? req.body.intro_images : [];
 
@@ -730,7 +734,7 @@ router.patch('/tenant', async (req, res) => {
   if (!tenantId) return res.status(400).json({ error: 'Missing tenantId' });
   try {
     const updates = {};
-    for (const k of ['about', 'about_image_url', 'course_banner_url', 'bank_name', 'bank_account', 'bank_account_name', 'payment_note', 'trial_course_id', 'welcome_message']) {
+    for (const k of ['about', 'about_image_url', 'course_banner_url', 'bank_name', 'bank_account', 'bank_account_name', 'payment_note', 'trial_course_id', 'welcome_message', 'full_payment_gift']) {
       if (req.body[k] !== undefined) updates[k] = req.body[k] || null;
     }
     // 教室人數上限是數字，0 代表不限制，不能跟著上面轉成 null
@@ -1381,63 +1385,10 @@ router.patch('/packages/:id/confirm', async (req, res) => {
 router.post('/payment-check/run', async (req, res) => {
   const { tenantId } = req.body;
   if (!tenantId) return res.status(400).json({ error: 'Missing tenantId' });
-
   try {
-    const { getTenantById } = await import('../middleware/tenant.js');
-    const { sendLinePush } = await import('../utils/line.js');
     const tenant = await getTenantById(tenantId);
     if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
-
-    const now = Date.now();
-
-    // 取得所有待匯款的課程包
-    const { data: pkgs } = await supabase
-      .from('booking_packages')
-      .select('*, course:course_id(name, payment_days), customer:customer_id(line_uid, name)')
-      .eq('tenant_id', tenantId)
-      .eq('status', 'pending_payment');
-
-    let reminded = 0, cancelled = 0;
-
-    for (const pkg of (pkgs || [])) {
-      const ageDays = (now - new Date(pkg.created_at).getTime()) / (1000 * 60 * 60 * 24);
-      const payDays = pkg.course?.payment_days || 3;
-      const uid = pkg.customer?.line_uid;
-
-      // 超過期限 → 取消
-      if (ageDays >= payDays) {
-        // 取消所有 bookings（trigger 自動釋出 booked_count）
-        await supabase.from('bookings').update({
-          status: 'cancelled', cancelled_at: new Date().toISOString(), cancelled_by: 'system'
-        }).eq('package_id', pkg.id).neq('status', 'cancelled');
-
-        await supabase.from('booking_packages').update({ status: 'cancelled' }).eq('id', pkg.id);
-
-        if (uid) {
-          await sendLinePush(
-            tenantId, tenant.line_access_token, uid,
-            `⚠️ 報名已自動取消\n\n${pkg.customer?.name || ''} 您好，您報名的「${pkg.course?.name}」因逾 ${payDays} 日未完成匯款，名額已自動釋出。\n\n如仍想上課，請重新報名。`,
-            'cancelled', null
-          );
-        }
-        cancelled++;
-      }
-      // 超過 (payDays - 1) 天且未提醒 → 催款
-      else if (ageDays >= payDays - 1 && !pkg.payment_reminded) {
-        if (uid) {
-          await sendLinePush(
-            tenantId, tenant.line_access_token, uid,
-            `🔔 匯款提醒\n\n${pkg.customer?.name || ''} 您好，您報名的「${pkg.course?.name}」尚未完成匯款。\n\n請於明日前完成匯款並回傳後五碼，逾期名額將自動釋出 🙏`,
-            'reminder', null
-          );
-        }
-        await supabase.from('booking_packages').update({ payment_reminded: true }).eq('id', pkg.id);
-        reminded++;
-      }
-    }
-
-    console.log(`[PaymentCheck] reminded ${reminded}, cancelled ${cancelled}`);
-    res.json({ success: true, reminded, cancelled });
+    res.json({ success: true, ...(await runPaymentCheck(tenant)) });
   } catch (error) {
     console.error('[PaymentCheck] Error:', error);
     res.status(500).json({ error: 'Failed', details: error.message });
@@ -1455,80 +1406,10 @@ router.post('/payment-check/run', async (req, res) => {
 router.post('/reminders/run', async (req, res) => {
   const { tenantId, dryRun } = req.body;
   if (!tenantId) return res.status(400).json({ error: 'Missing tenantId' });
-
   try {
-    const { getTenantById } = await import('../middleware/tenant.js');
-    const { sendLinePush } = await import('../utils/line.js');
-
     const tenant = await getTenantById(tenantId);
     if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
-
-    // 計算明天的範圍（台灣時區）
-    const now = new Date();
-    const tomorrow = new Date(now);
-    tomorrow.setDate(tomorrow.getDate() + 1);
-    const tomorrowStart = new Date(tomorrow.getFullYear(), tomorrow.getMonth(), tomorrow.getDate(), 0, 0, 0);
-    const tomorrowEnd = new Date(tomorrow.getFullYear(), tomorrow.getMonth(), tomorrow.getDate(), 23, 59, 59);
-
-    // 查明天的預約（confirmed 狀態）
-    const { data: bookings, error } = await supabase
-      .from('bookings')
-      .select(`
-        id,
-        customer:customer_id(line_uid, name),
-        course:course_id(name),
-        slot:slot_id(start_at, end_at)
-      `)
-      .eq('tenant_id', tenantId)
-      .eq('status', 'confirmed')
-      .gte('slot.start_at', tomorrowStart.toISOString())
-      .lte('slot.start_at', tomorrowEnd.toISOString());
-
-    if (error) throw error;
-
-    const valid = (bookings || []).filter(b => b.slot && b.customer?.line_uid);
-
-    if (dryRun) {
-      return res.json({
-        success: true,
-        dryRun: true,
-        count: valid.length,
-        bookings: valid.map(b => ({
-          customer: b.customer.name,
-          course: b.course?.name,
-          start: b.slot.start_at,
-        })),
-      });
-    }
-
-    // 實際推播
-    let sent = 0;
-    let failed = 0;
-    for (const b of valid) {
-      const start = new Date(b.slot.start_at).toLocaleString('zh-TW', {
-        timeZone: 'Asia/Taipei',
-        hour: '2-digit', minute: '2-digit'
-      });
-      const msg =
-        `📢 提醒您：明天有課喔～\n\n` +
-        `${b.customer.name || ''} 您好，\n` +
-        `📚 ${b.course?.name}\n` +
-        `🕐 明天 ${start}\n\n` +
-        `期待見到您！`;
-
-      const ok = await sendLinePush(
-        tenantId,
-        tenant.line_access_token,
-        b.customer.line_uid,
-        msg,
-        'reminder',
-        b.id
-      );
-      if (ok) sent++; else failed++;
-    }
-
-    console.log(`[Reminders] Sent ${sent}, failed ${failed}`);
-    res.json({ success: true, sent, failed, total: valid.length });
+    res.json({ success: true, ...(await runReminders(tenant, { dryRun: !!dryRun })) });
   } catch (error) {
     console.error('[Reminders] Error:', error);
     res.status(500).json({ error: 'Failed to run reminders', details: error.message });

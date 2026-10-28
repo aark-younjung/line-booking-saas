@@ -1,3 +1,7 @@
 node_modules/
 .env
 dist/
+
+# 新店家設定檔（含 LINE 金鑰與密碼，不可進版控）
+scripts/tenants/*.json
+!scripts/tenants/example.json

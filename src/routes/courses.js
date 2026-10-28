@@ -14,7 +14,7 @@ router.get('/:tenantId/bank-info', async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('tenants')
-      .select('bank_name, bank_account, bank_account_name, payment_note')
+      .select('bank_name, bank_account, bank_account_name, payment_note, full_payment_gift')
       .eq('id', tenantId)
       .single();
     if (error) throw error;

@@ -1,0 +1,33 @@
+{
+  "_說明": "複製這個檔案改名（例如 gawan.json），填好後執行：node scripts/create-tenant.mjs scripts/tenants/gawan.json",
+
+  "slug": "gawan",
+  "name": "伽菀瑜伽",
+  "plan": "trial",
+  "trial_days": 30,
+
+  "owner": {
+    "name": "楊心潔",
+    "email": "owner@example.com",
+    "password": "",
+    "line_uid": ""
+  },
+
+  "line": {
+    "channel_id": "",
+    "channel_secret": "",
+    "access_token": "",
+    "liff_id": ""
+  },
+
+  "bank": {
+    "bank_name": "",
+    "bank_account": "",
+    "bank_account_name": "",
+    "payment_note": ""
+  },
+
+  "room_capacity": 0,
+  "friend_check_mode": "force",
+  "welcome_message": ""
+}

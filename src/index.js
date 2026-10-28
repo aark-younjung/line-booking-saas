@@ -7,6 +7,7 @@ import bookingsRouter from './routes/bookings.js';
 import superadminRouter from './routes/superadmin.js';
 import adminRouter from './routes/admin.js';
 import classesRouter from './routes/classes.js';
+import cronRouter from './routes/cron.js';
 
 dotenv.config();
 
@@ -75,6 +76,9 @@ app.use('/api/admin', adminRouter);
 
 // 固定班制（AFA 證照課）
 app.use('/api/classes', classesRouter);
+
+// 每日排程（Cloudflare Worker 呼叫，x-cron-key 驗證）
+app.use('/api/cron', cronRouter);
 
 // ============================================================
 // 錯誤處理

@@ -16,7 +16,7 @@ const router = express.Router();
  * Body: { tenantId, courseId, name, total_sessions, capacity, price }
  */
 router.post('/groups', requireOwner, async (req, res) => {
-  const { tenantId, courseId, name, total_sessions, capacity, price, payment_note, installment_1 } = req.body;
+  const { tenantId, courseId, name, total_sessions, capacity, price, payment_note, installment_1, installment_2_when } = req.body;
   if (!tenantId || !courseId || !name) return res.status(400).json({ error: 'Missing fields' });
 
   try {
@@ -31,6 +31,7 @@ router.post('/groups', requireOwner, async (req, res) => {
         price: parseInt(price, 10) || 0,
         payment_note: payment_note || null,
         installment_1: installment_1 ? parseInt(installment_1, 10) : null,
+        installment_2_when: installment_2_when || null,
         status: 'recruiting',
       })
       .select()
@@ -48,7 +49,7 @@ router.post('/groups', requireOwner, async (req, res) => {
  */
 router.patch('/groups/:id', requireOwner, async (req, res) => {
   const { id } = req.params;
-  const { tenantId, name, capacity, price, payment_note, installment_1, status } = req.body;
+  const { tenantId, name, capacity, price, payment_note, installment_1, installment_2_when, status } = req.body;
   if (!tenantId) return res.status(400).json({ error: 'Missing tenantId' });
   try {
     const updates = {};
@@ -57,6 +58,7 @@ router.patch('/groups/:id', requireOwner, async (req, res) => {
     if (price !== undefined) updates.price = parseInt(price, 10);
     if (payment_note !== undefined) updates.payment_note = payment_note;
     if (installment_1 !== undefined) updates.installment_1 = installment_1 ? parseInt(installment_1, 10) : null;
+    if (installment_2_when !== undefined) updates.installment_2_when = installment_2_when || null;
     if (status !== undefined) updates.status = status;
     const { data, error } = await supabase
       .from('class_groups').update(updates).eq('id', id).eq('tenant_id', tenantId).select().single();
