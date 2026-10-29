@@ -3,6 +3,7 @@ import { supabase } from '../lib/supabase.js';
 import { issueToken, checkPassword, requireOwner, requireCron } from '../middleware/auth.js';
 import { getTenantById } from '../middleware/tenant.js';
 import { runReminders, runPaymentCheck } from '../lib/dailyJobs.js';
+import { signScreenshot } from '../lib/paymentScreenshot.js';
 
 const router = express.Router();
 
@@ -192,6 +193,9 @@ router.get('/bookings/:id/payment', async (req, res) => {
     if (error || !payment) {
       return res.status(404).json({ error: 'Payment info not found' });
     }
+
+    // 截圖在私有 bucket，回傳 1 小時有效的網址
+    payment.screenshot_url = await signScreenshot(payment.screenshot_url);
 
     res.json({ success: true, data: payment });
   } catch (error) {

@@ -4,6 +4,7 @@ import { supabase } from '../lib/supabase.js';
 import { requireOwner } from '../middleware/auth.js';
 import { sendLinePush } from '../utils/line.js';
 import { getTenantById } from '../middleware/tenant.js';
+import { saveScreenshot } from '../lib/paymentScreenshot.js';
 
 const router = express.Router();
 
@@ -663,17 +664,22 @@ router.post('/', async (req, res) => {
 /**
  * POST /api/bookings/:id/payment
  * 提交匯款資訊（後五碼或截圖）
- * Body: { method, lastFiveDigits or screenshotUrl, amount }
+ * Body: { method, lastFiveDigits or screenshotData, amount }
+ *   screenshotData：data:image/...;base64,...（前端壓縮過），存到私有 Storage
  */
 router.post('/:id/payment', async (req, res) => {
   const { id: bookingId } = req.params;
   const { tenantId } = req.body;
-  const { method, lastFiveDigits, screenshotUrl, amount } = req.body;
+  const { method, lastFiveDigits, screenshotData, amount } = req.body;
 
   if (!tenantId || !method || (method === 'last_five' && !lastFiveDigits)) {
     return res.status(400).json({
       error: 'Missing required fields',
     });
+  }
+  // 舊版前端選截圖只會送「(暫時略過上傳)」，圖片根本沒傳上來 → 擋下來請學員重新整理
+  if (method === 'screenshot' && !screenshotData) {
+    return res.status(400).json({ error: '沒有收到截圖，請重新整理頁面後再上傳一次' });
   }
 
   try {
@@ -704,6 +710,17 @@ router.post('/:id/payment', async (req, res) => {
       });
     }
 
+    // 截圖先存檔，存不進去就不要改狀態（不然業主會看到「截圖」卻沒有圖）
+    let screenshotPath = null;
+    if (method === 'screenshot') {
+      try {
+        screenshotPath = await saveScreenshot(tenantId, bookingId, screenshotData);
+      } catch (err) {
+        console.error('[Bookings] screenshot upload failed:', err);
+        return res.status(err.status || 500).json({ error: err.status ? err.message : '截圖上傳失敗，請稍後再試' });
+      }
+    }
+
     // 重新送出時，先清掉舊的繳費記錄（避免業主看到兩筆混淆）
     if (booking.status === 'pending_confirmation') {
       await supabase.from('payment_confirmations').delete().eq('booking_id', bookingId);
@@ -717,7 +734,7 @@ router.post('/:id/payment', async (req, res) => {
         booking_id: bookingId,
         method,
         last_five_digits: lastFiveDigits || null,
-        screenshot_url: screenshotUrl || null,
+        screenshot_url: screenshotPath,
         amount: amount || null,
       })
       .select()
@@ -758,6 +775,7 @@ router.post('/:id/payment', async (req, res) => {
         `客戶：${customer?.name}\n` +
         `方式：${PAY_METHOD_LABEL[method] || method}\n` +
         (lastFiveDigits ? `後五碼：${lastFiveDigits}\n` : '') +
+        (screenshotPath ? `截圖：請到後台「待確認匯款」查看\n` : '') +
         `金額：${amount || '(待填)'}`;
 
       await sendLinePush(
