@@ -1167,6 +1167,85 @@ router.post('/bookings/:id/cancel', async (req, res) => {
 });
 
 /**
+ * POST /api/admin/bookings/:id/payment-reminder
+ * 業主手動「通知匯款」：發 LINE 給還沒付款的學員（含金額、匯款帳號、回報連結）
+ * 課程包的任一堂都可以按，發的是整包的金額；同一筆 10 分鐘內不重發（防連按）。
+ * Body: { tenantId }
+ */
+router.post('/bookings/:id/payment-reminder', async (req, res) => {
+  const { id } = req.params;
+  const { tenantId } = req.body;
+  if (!tenantId) return res.status(400).json({ error: 'Missing tenantId' });
+
+  try {
+    const tenant = await getTenantById(tenantId);
+    if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
+
+    const { data: booking } = await supabase
+      .from('bookings')
+      .select('id, status, package_id, slot:slot_id(start_at), course:course_id(name, price), customer:customer_id(line_uid, name)')
+      .eq('id', id)
+      .eq('tenant_id', tenantId)
+      .single();
+    if (!booking) return res.status(404).json({ error: 'Booking not found' });
+    if (booking.status !== 'pending_payment') return res.status(409).json({ error: '這筆預約不是「待付款」，不需要通知' });
+    if (!booking.customer?.line_uid) return res.status(409).json({ error: '這位學員沒有 LINE 帳號，請用電話聯絡' });
+    if (!tenant.line_access_token) return res.status(409).json({ error: '這家店還沒串接 LINE，無法發送通知' });
+
+    // 課程包：金額用整包，防重發也看整包的所有堂次
+    let amount = booking.course?.price;
+    let ids = [booking.id];
+    let what = booking.course?.name;
+    if (booking.package_id) {
+      const { data: pkg } = await supabase
+        .from('booking_packages').select('total_price, sessions')
+        .eq('id', booking.package_id).eq('tenant_id', tenantId).single();
+      const { data: siblings } = await supabase
+        .from('bookings').select('id').eq('package_id', booking.package_id).eq('tenant_id', tenantId);
+      amount = pkg?.total_price ?? amount;
+      ids = (siblings || []).map(s => s.id);
+      if (pkg?.sessions) what = `${what}（${pkg.sessions} 堂）`;
+    }
+
+    const { data: recent } = await supabase
+      .from('notifications_log')
+      .select('created_at')
+      .eq('tenant_id', tenantId)
+      .eq('event_type', 'payment_reminder')
+      .in('booking_id', ids)
+      .gte('created_at', new Date(Date.now() - 10 * 60 * 1000).toISOString())
+      .limit(1);
+    if (recent?.length) return res.status(429).json({ error: '10 分鐘內已經通知過了' });
+
+    const when = booking.slot?.start_at && !booking.package_id
+      ? new Date(booking.slot.start_at).toLocaleString('zh-TW', {
+          timeZone: 'Asia/Taipei', month: 'numeric', day: 'numeric', weekday: 'short', hour: '2-digit', minute: '2-digit',
+        })
+      : null;
+    const bank = tenant.bank_account
+      ? `\n\n匯款帳戶\n${tenant.bank_name || ''}\n${tenant.bank_account}${tenant.bank_account_name ? `\n戶名：${tenant.bank_account_name}` : ''}`
+      : '';
+    const link = tenant.liff_id ? `\n\n匯款後請到這裡回報後五碼：\nhttps://liff.line.me/${tenant.liff_id}/my` : '\n\n匯款後請回報後五碼，謝謝！';
+
+    const msg =
+      `🔔 匯款提醒\n\n${booking.customer.name || ''} 您好，您預約的「${what}」` +
+      (when ? `（${when}）` : '') +
+      `還沒有完成付款，名額先幫您保留著 🙏` +
+      (amount ? `\n\n金額：NT$ ${Number(amount).toLocaleString()}` : '') +
+      bank + link;
+
+    const ok = await sendLinePush(tenant.id, tenant.line_access_token, booking.customer.line_uid, msg, 'payment_reminder', booking.id);
+    if (!ok) return res.status(502).json({ error: 'LINE 訊息發送失敗，請稍後再試' });
+
+    console.log(`[Admin] Payment reminder sent: booking ${id}`);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('[Admin] Error sending payment reminder:', error);
+    res.status(500).json({ error: '發送失敗', details: error.message });
+  }
+});
+
+/**
  * POST /api/admin/packages/:id/cancel
  * 取消整個課程包（含底下所有堂次）
  * Body: { tenantId, reason? }
