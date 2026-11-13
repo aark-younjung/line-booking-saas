@@ -1168,6 +1168,73 @@ router.post('/bookings/:id/cancel', async (req, res) => {
 });
 
 /**
+ * POST /api/admin/bookings/messages
+ * 每筆預約「發給學員的 LINE 訊息」紀錄（後台卡片上顯示）
+ * LINE 官方帳號後台的聊天室看不到系統用 API 發的訊息，業主只能從這裡看。
+ *
+ * 對應方式：notifications_log 有 booking_id 的直接對；課程包、排程催款等很多紀錄沒有
+ * booking_id，改用「收件人是這位學員 ＋ 訊息裡有這門課的課名 ＋ 在報名之後發的」對回去。
+ * Body: { tenantId, bookingIds: [] }   回傳: { [bookingId]: [{ created_at, event_type, status, message }] }
+ */
+router.post('/bookings/messages', async (req, res) => {
+  const { tenantId, bookingIds } = req.body;
+  if (!tenantId || !Array.isArray(bookingIds)) return res.status(400).json({ error: 'Missing tenantId or bookingIds' });
+  if (bookingIds.length === 0) return res.json({ success: true, data: {} });
+
+  try {
+    const { data: bookings } = await supabase
+      .from('bookings')
+      .select('id, package_id, created_at, course:course_id(name), customer:customer_id(line_uid)')
+      .eq('tenant_id', tenantId)
+      .in('id', bookingIds.slice(0, 500));
+
+    // 課程包要連同其他堂次的紀錄一起看
+    const pkgIds = [...new Set((bookings || []).map(b => b.package_id).filter(Boolean))];
+    const { data: siblings } = pkgIds.length
+      ? await supabase.from('bookings').select('id, package_id, created_at').eq('tenant_id', tenantId).in('package_id', pkgIds)
+      : { data: [] };
+    const group = {};   // package_id 或 booking id → { ids, since }
+    for (const b of [...(bookings || []), ...(siblings || [])]) {
+      const key = b.package_id || b.id;
+      const g = group[key] || (group[key] = { ids: new Set(), since: b.created_at });
+      g.ids.add(b.id);
+      if (b.created_at < g.since) g.since = b.created_at;
+    }
+
+    const uids = [...new Set((bookings || []).map(b => b.customer?.line_uid).filter(Boolean))];
+    if (uids.length === 0) return res.json({ success: true, data: {} });
+    const since = Object.values(group).reduce((m, g) => (g.since < m ? g.since : m), new Date().toISOString());
+    const { data: logs, error } = await supabase
+      .from('notifications_log')
+      .select('booking_id, target_uid, event_type, status, message, created_at')
+      .eq('tenant_id', tenantId)
+      .in('target_uid', uids)
+      .gte('created_at', new Date(new Date(since).getTime() - 60_000).toISOString())
+      .order('created_at', { ascending: false })
+      .limit(2000);
+    if (error) throw error;
+
+    const out = {};
+    for (const b of bookings || []) {
+      const g = group[b.package_id || b.id];
+      const from = new Date(g.since).getTime() - 60_000;
+      const name = b.course?.name;
+      out[b.id] = (logs || [])
+        .filter(l => l.target_uid === b.customer?.line_uid && (
+          l.booking_id
+            ? g.ids.has(l.booking_id)
+            : !!name && l.message.includes(name) && new Date(l.created_at).getTime() >= from
+        ))
+        .map(({ event_type, status, message, created_at }) => ({ event_type, status, message, created_at }));
+    }
+    res.json({ success: true, data: out });
+  } catch (error) {
+    console.error('[Admin] Error fetching booking messages:', error);
+    res.status(500).json({ error: 'Failed to fetch messages', details: error.message });
+  }
+});
+
+/**
  * POST /api/admin/bookings/:id/payment-reminder
  * 業主手動「通知匯款」：發 LINE 給還沒付款的學員（含金額、匯款帳號、回報連結）
  * 課程包的任一堂都可以按，發的是整包的金額；同一筆 10 分鐘內不重發（防連按）。
